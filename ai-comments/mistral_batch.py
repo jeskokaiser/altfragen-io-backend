@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -76,7 +77,7 @@ def build_batch_file(
 def submit_batch(
     questions: Iterable[Dict[str, Any]],
     client: "Mistral | None" = None,
-    model: str = "mistral-small-latest",
+    model: str = "mistral-medium-latest",
 ) -> Tuple[str, List[str]]:
     """
     Create a Mistral batch job from questions.
@@ -289,6 +290,7 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                 logger.debug(f"Question {qid}: content preview (first 500 chars): {str(content)[:500]}")
             
             # Parse JSON content
+            # Mistral often returns JSON wrapped in markdown code blocks, so we need to extract it
             try:
                 if isinstance(content, dict):
                     commentary = content
@@ -298,7 +300,32 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                         logger.error(f"Question {qid}: content is empty string")
                         results[qid] = {"error": "empty content"}
                         continue
-                    commentary = json.loads(content_stripped)
+                    
+                    # Try to extract JSON from markdown code blocks
+                    # Pattern to match ```json ... ``` blocks
+                    json_block_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
+                    matches = re.findall(json_block_pattern, content_stripped, re.DOTALL)
+                    
+                    if matches:
+                        # Use the first JSON block found
+                        json_str = matches[0]
+                        logger.debug(f"Question {qid}: extracted JSON from markdown code block")
+                        commentary = json.loads(json_str)
+                    else:
+                        # Try to find JSON object directly in the text
+                        # Look for { ... } pattern
+                        json_obj_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+                        json_matches = re.findall(json_obj_pattern, content_stripped, re.DOTALL)
+                        
+                        if json_matches:
+                            # Try to parse the largest match (likely the main JSON object)
+                            json_str = max(json_matches, key=len)
+                            logger.debug(f"Question {qid}: extracted JSON object from text")
+                            commentary = json.loads(json_str)
+                        else:
+                            # Last resort: try parsing the whole content as JSON
+                            logger.debug(f"Question {qid}: attempting to parse entire content as JSON")
+                            commentary = json.loads(content_stripped)
                 else:
                     logger.error(f"Question {qid}: unexpected content type: {type(content)}")
                     results[qid] = {"error": f"unexpected content type: {type(content)}"}
@@ -308,11 +335,21 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                 logger.debug(f"Successfully parsed commentary for question {qid}")
             except json.JSONDecodeError as exc:
                 logger.error(f"Question {qid}: failed to parse content as JSON: {exc}")
-                logger.error(f"Content (full): {repr(content)}")
-                logger.error(f"Content (first 1000 chars): {str(content)[:1000]}")
-                # Log the full response structure for debugging
-                logger.debug(f"Full response structure: {json.dumps(obj, indent=2, default=str)}")
-                results[qid] = {"error": f"parse error: {exc}"}
+                logger.error(f"Content (first 500 chars): {str(content)[:500]}")
+                # Try one more time with a more aggressive extraction
+                try:
+                    # Try to find any JSON-like structure
+                    json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', str(content), re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(0)
+                        commentary = json.loads(json_str)
+                        results[qid] = commentary
+                        logger.info(f"Question {qid}: successfully extracted JSON on retry")
+                    else:
+                        results[qid] = {"error": f"parse error: {exc}"}
+                except Exception as retry_exc:
+                    logger.error(f"Question {qid}: retry also failed: {retry_exc}")
+                    results[qid] = {"error": f"parse error: {exc}"}
             except Exception as exc:
                 logger.error(f"Question {qid}: unexpected error parsing content: {exc}", exc_info=True)
                 results[qid] = {"error": f"parse error: {exc}"}
