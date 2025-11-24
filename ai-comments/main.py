@@ -11,6 +11,7 @@ import uvicorn
 # PYTHONPATH is set to /app in Dockerfile, so we can import directly
 import ai_commentary_submit
 import ai_commentary_consume
+from pushover_notifier import get_notifier
 
 submit_main = ai_commentary_submit.main
 consume_main = ai_commentary_consume.main
@@ -112,6 +113,13 @@ async def run_submit():
         await submit_main()
     except Exception as e:
         logger.error(f"Error in submit process: {e}", exc_info=True)
+        # Send Pushover notification
+        notifier = get_notifier()
+        await notifier.notify_error(
+            context="Submit Process",
+            error=e,
+            details="The AI commentary submit process encountered a critical error."
+        )
 
 
 async def run_consume():
@@ -120,6 +128,13 @@ async def run_consume():
         await consume_main()
     except Exception as e:
         logger.error(f"Error in consume process: {e}", exc_info=True)
+        # Send Pushover notification
+        notifier = get_notifier()
+        await notifier.notify_error(
+            context="Consume Process",
+            error=e,
+            details="The AI commentary consume process encountered a critical error."
+        )
 
 
 if __name__ == "__main__":

@@ -56,6 +56,27 @@ class SupabaseClient:
             "models_enabled": row.get("models_enabled") or {},
             "feature_enabled": bool(row.get("feature_enabled")),
         }
+    
+    async def disable_feature(self) -> bool:
+        """
+        Disable the AI commentary feature by setting feature_enabled to False.
+        Returns True if successful, False otherwise.
+        """
+        def _update():
+            response = self._client.table("ai_commentary_settings").update({
+                "feature_enabled": False
+            }).execute()
+            return len(response.data) > 0
+        
+        try:
+            result = await self._run_sync(_update)
+            return result
+        except Exception as e:
+            # Log but don't raise - this is a safety mechanism
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to disable feature in database: {e}", exc_info=True)
+            return False
 
     # -------------------------------------------------------------------------
     # Candidate question selection

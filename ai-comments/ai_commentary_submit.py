@@ -12,10 +12,50 @@ from gemini_batch import submit_batch as submit_gemini_batch
 from mistral_batch import submit_batch as submit_mistral_batch
 from perplexity_instant import generate_commentary as generate_perplexity_commentary
 from deepseek_instant import generate_commentary as generate_deepseek_commentary
+from pushover_notifier import get_notifier
+from quota_detector import is_quota_error, extract_quota_message
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ai_commentary_submit")
+
+
+async def handle_quota_error(
+    supabase: SupabaseClient,
+    api_name: str,
+    error: Exception,
+) -> None:
+    """
+    Handle quota/credit errors by disabling the feature and sending notifications.
+    
+    Args:
+        supabase: Supabase client instance
+        api_name: Name of the API that ran out of credits
+        error: The exception that occurred
+    """
+    if is_quota_error(error, api_name):
+        logger.error(
+            "Quota/credit error detected for %s: %s. Disabling feature.",
+            api_name,
+            error,
+        )
+        
+        # Disable the feature
+        disabled = await supabase.disable_feature()
+        
+        # Send notification
+        notifier = get_notifier()
+        quota_msg = extract_quota_message(error, api_name)
+        await notifier.notify_critical(
+            context="API Credits Exhausted",
+            message=f"{api_name} has run out of credits/quota",
+            details=f"{quota_msg}. AI commentary feature has been automatically disabled."
+        )
+        
+        if disabled:
+            logger.info("AI commentary feature has been disabled due to quota error")
+        else:
+            logger.warning("Failed to disable feature in database, but notification was sent")
 
 
 async def main() -> None:
@@ -74,6 +114,15 @@ async def main() -> None:
                 logger.info("Created OpenAI batch %s.", batch_id)
             except Exception as e:
                 logger.error("Failed to submit OpenAI batch: %s", e, exc_info=True)
+                # Check for quota error and disable feature if needed
+                await handle_quota_error(supabase, "OpenAI", e)
+                
+                notifier = get_notifier()
+                await notifier.notify_error(
+                    context="OpenAI Batch Submission",
+                    error=e,
+                    details=f"Failed to submit batch for {len(claimed_questions)} questions"
+                )
                 # Continue with other models
 
         # Gemini
@@ -92,6 +141,15 @@ async def main() -> None:
                 logger.info("Created Gemini batch %s.", job_name)
             except Exception as e:
                 logger.error("Failed to submit Gemini batch: %s", e, exc_info=True)
+                # Check for quota error and disable feature if needed
+                await handle_quota_error(supabase, "Gemini", e)
+                
+                notifier = get_notifier()
+                await notifier.notify_error(
+                    context="Gemini Batch Submission",
+                    error=e,
+                    details=f"Failed to submit batch for {len(claimed_questions)} questions"
+                )
                 # Continue with other models
 
         # Mistral
@@ -115,6 +173,15 @@ async def main() -> None:
                     logger.info("Created Mistral batch %s.", job_id)
             except Exception as e:
                 logger.error("Failed to submit Mistral batch: %s", e, exc_info=True)
+                # Check for quota error and disable feature if needed
+                await handle_quota_error(supabase, "Mistral", e)
+                
+                notifier = get_notifier()
+                await notifier.notify_error(
+                    context="Mistral Batch Submission",
+                    error=e,
+                    details=f"Failed to submit batch for {len(claimed_questions)} questions"
+                )
                 # Continue with other models
 
         # Perplexity and Deepseek: instant API calls (no batch discount)
@@ -133,6 +200,10 @@ async def main() -> None:
                 ", ".join(name for name, _ in instant_models),
             )
 
+            # Track failures for notification purposes
+            model_failure_counts: Dict[str, int] = {name: 0 for name, _ in instant_models}
+            total_calls = {name: 0 for name, _ in instant_models}
+
             # Process all questions with all instant models in parallel
             async def process_question_with_instant_models(question: Dict[str, Any]) -> None:
                 answer_comments: Dict[str, Any] = {}
@@ -141,10 +212,13 @@ async def main() -> None:
                 # Call all instant models in parallel with individual error handling
                 async def call_model_safely(model_name: str, generate_fn) -> tuple[str, Any]:
                     """Call a model and return (model_name, result_or_exception)"""
+                    nonlocal model_failure_counts, total_calls
+                    total_calls[model_name] += 1
                     try:
                         result = await generate_fn(question)
                         return (model_name, result)
                     except Exception as e:
+                        model_failure_counts[model_name] += 1
                         logger.error(
                             "%s error for question %s: %s",
                             model_name,
@@ -152,6 +226,8 @@ async def main() -> None:
                             e,
                             exc_info=True,
                         )
+                        # Check for quota error and disable feature if needed
+                        await handle_quota_error(supabase, model_name.capitalize(), e)
                         return (model_name, e)
 
                 # Call all models in parallel
@@ -236,6 +312,13 @@ async def main() -> None:
                         e,
                         exc_info=True,
                     )
+                    # Send notification for critical processing errors
+                    notifier = get_notifier()
+                    await notifier.notify_error(
+                        context="Instant API Processing",
+                        error=e,
+                        details=f"Failed to process question {question.get('id')} with instant models"
+                    )
                     # Continue processing other questions
 
             results = await asyncio.gather(
@@ -253,6 +336,26 @@ async def main() -> None:
                 failed,
                 len(claimed_questions),
             )
+            
+            # Send notifications for high failure rates per model
+            notifier = get_notifier()
+            for model_name, _ in instant_models:
+                failures = model_failure_counts[model_name]
+                total = total_calls[model_name]
+                
+                if total > 0:
+                    failure_rate = failures / total
+                    if failure_rate > 0.2:  # More than 20% failures
+                        await notifier.notify_warning(
+                            context=f"{model_name.capitalize()} Instant API",
+                            message=f"High failure rate: {failures}/{total} calls failed ({failure_rate*100:.1f}%)"
+                        )
+                    elif failures > 0 and total <= 3:  # If all or most calls failed on small batch
+                        await notifier.notify_error(
+                            context=f"{model_name.capitalize()} Instant API",
+                            error=Exception(f"{failures} out of {total} calls failed"),
+                            details=f"Processing {len(claimed_questions)} questions"
+                        )
 
     finally:
         await supabase.close()

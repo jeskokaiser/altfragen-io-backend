@@ -34,6 +34,8 @@ The worker expects the following variables on your VPS:
 - `OPENAI_API_KEY` – for OpenAI Batch API
 - `GEMINI_API_KEY` – for Gemini Batch API
 - `MISTRAL_API_KEY` – for Mistral Batch API
+- `PUSHOVER_USER_KEY` – (optional) Pushover user key for error notifications
+- `PUSHOVER_API_TOKEN` – (optional) Pushover API token for error notifications
 
 Installation
 ------------
@@ -98,6 +100,43 @@ Example cron configuration (assuming `python` and venv are set up properly):
 ```
 
 Adjust paths and intervals as needed for your environment.
+
+Pushover Notifications
+----------------------
+
+The worker can send push notifications via Pushover when errors occur. To enable:
+
+1. Create a Pushover account at https://pushover.net
+2. Create an application to get an API token
+3. Get your user key from your account dashboard
+4. Set the environment variables:
+   - `PUSHOVER_USER_KEY` – Your Pushover user key
+   - `PUSHOVER_API_TOKEN` – Your Pushover application API token
+
+Notifications are sent for:
+- Critical errors in submit/consume processes
+- Batch job submission failures
+- Batch job status issues (non-successful completions)
+- Missing output files from batch jobs
+- High error rates (>20%) in batch processing
+
+If Pushover credentials are not set, notifications are silently disabled and the worker continues to function normally.
+
+Automatic Feature Disabling on Quota Errors
+-------------------------------------------
+
+The worker automatically detects when any AI API runs out of credits/quota and will:
+
+1. **Detect quota errors** from all supported APIs (OpenAI, Gemini, Mistral, Perplexity, DeepSeek)
+2. **Automatically disable** the AI commentary feature by setting `feature_enabled = FALSE` in `ai_commentary_settings`
+3. **Send a Pushover notification** alerting you that the feature has been disabled
+
+Quota errors are detected by analyzing error messages for patterns like:
+- "quota", "credit", "insufficient funds", "billing"
+- HTTP status codes 429 (Too Many Requests) or 402 (Payment Required)
+- API-specific error codes (e.g., OpenAI's `insufficient_quota`, Gemini's `resource_exhausted`)
+
+Once disabled, the feature will remain off until manually re-enabled in the Supabase settings. This prevents the system from continuing to attempt API calls when credits are exhausted.
 
 
 

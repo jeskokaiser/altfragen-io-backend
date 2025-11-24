@@ -65,7 +65,7 @@ STRIKTE VORGABEN:
   - Formuliere jede Option klar, konsistent und gut lesbar neu.
   - Falls eine Option leer, unvollständig oder offensichtlich fehlerhaft ist, ergänze oder korrigiere sie so, dass:
     - sie inhaltlich zum Fragenthema passt,
-    - das Gesamtniveau einer realistischen Examensfrage beibehalten wird,
+    - das Gesamtniveau einer realistischen Examensfrage beibehalten wird, tendentiell schwerer,
     - das Antwortset weiterhin eine sinnvolle Mischung aus richtiger(n) und falschen, aber plausiblen Distraktoren darstellt.
   - Achte auf einheitlichen Stil (z. B. alle Optionen als vollständige Sätze oder alle als Stichpunkte).
   - Verwende kein A) B) C) D) E) vor oder nach der Antwortoption.
