@@ -1,4 +1,15 @@
 api.altfragen.io {
-    reverse_proxy app:8000
-}
 
+    @old_root not path /parser* /ai*
+    handle @old_root {
+        redir /parser{uri} 301
+    }
+
+    handle_path /parser* {
+        reverse_proxy altfragen_parser:8000
+    }
+
+    handle_path /ai* {
+        reverse_proxy altfragen_ai:8000
+    }
+}

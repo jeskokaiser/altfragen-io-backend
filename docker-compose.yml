@@ -1,19 +1,19 @@
 services:
   altfragen_parser:
-    build: ./app       # ggf. in ./parser o.Ä. umbenennen
+    build: ./parser
     container_name: altfragen_parser
     env_file: .env
     volumes:
-      - ./app:/app
+      - ./parser:/app
     networks:
       - backend
 
   altfragen_ai:
-    build: ./ai        # Ordner für deinen AI-Container
+    build: ./ai-comments
     container_name: altfragen_ai
-    env_file: .env.ai  # optional eigene Env-Datei
+    env_file: .env
     volumes:
-      - ./ai:/app
+      - ./ai-comments:/app
     networks:
       - backend
 
