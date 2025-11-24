@@ -97,7 +97,7 @@ async def process_gemini_batches(supabase: SupabaseClient) -> None:
 
     for job in jobs:
         job_name = job["batch_id"]
-        question_ids: List[int] = job.get("question_ids") or []
+        question_ids: List[str] = [str(qid) for qid in (job.get("question_ids") or [])]
         logger.info("Checking Gemini batch %s", job_name)
         batch_job = client.batches.get(name=job_name)
         state_name = batch_job.state.name

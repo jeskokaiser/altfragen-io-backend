@@ -29,10 +29,10 @@ def build_batch_file(
     Build an in-memory JSONL batch file as described in the Mistral docs.
     """
     buffer = BytesIO()
-    question_ids: List[int] = []
+    question_ids: List[str] = []
 
     for idx, q in enumerate(questions):
-        qid = int(q["id"])
+        qid = str(q["id"])  # Handle UUIDs as strings
         question_ids.append(qid)
         request = {
             "custom_id": f"q-{qid}",
@@ -62,7 +62,7 @@ def submit_batch(
     questions: Iterable[Dict[str, Any]],
     client: "Mistral | None" = None,
     model: str = "mistral-small-latest",
-) -> Tuple[str, List[int]]:
+) -> Tuple[str, List[str]]:
     """
     Create a Mistral batch job from questions.
 
@@ -87,11 +87,11 @@ def submit_batch(
     return created_job.id, question_ids
 
 
-def parse_results_file(path: Path) -> Dict[int, Dict[str, Any]]:
+def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
     """
     Parse the downloaded batch results file into question_id -> commentary dict.
     """
-    results: Dict[int, Dict[str, Any]] = {}
+    results: Dict[str, Dict[str, Any]] = {}
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -100,7 +100,7 @@ def parse_results_file(path: Path) -> Dict[int, Dict[str, Any]]:
             custom_id = obj.get("custom_id", "")
             if not custom_id.startswith("q-"):
                 continue
-            qid = int(custom_id.split("-", 1)[1])
+            qid = custom_id.split("-", 1)[1]  # Extract UUID string, not int
 
             error = obj.get("error")
             if error:

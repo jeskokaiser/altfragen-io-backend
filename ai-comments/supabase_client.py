@@ -120,7 +120,7 @@ class SupabaseClient:
         return await self._run_sync(_select)
 
     async def _select_existing_comments(
-        self, question_ids: List[int]
+        self, question_ids: List[str]
     ) -> List[Dict[str, Any]]:
         if not question_ids:
             return []
@@ -141,7 +141,7 @@ class SupabaseClient:
         return await self._run_sync(_select)
 
     async def _select_existing_summaries(
-        self, question_ids: List[int]
+        self, question_ids: List[str]
     ) -> List[Dict[str, Any]]:
         if not question_ids:
             return []
@@ -160,7 +160,7 @@ class SupabaseClient:
         self,
         batch_size: int,
         processing_delay_minutes: int,
-    ) -> Tuple[List[int], List[int]]:
+    ) -> Tuple[List[str], List[str]]:
         """
         Reproduce the TS logic to find candidate questions and decide which
         IDs to process vs clean up.
@@ -217,7 +217,7 @@ class SupabaseClient:
         if not candidate_questions:
             return [], []
 
-        candidate_ids: List[int] = [q["id"] for q in candidate_questions]
+        candidate_ids: List[str] = [str(q["id"]) for q in candidate_questions]
 
         existing_comments = await self._select_existing_comments(candidate_ids)
         existing_summaries = await self._select_existing_summaries(candidate_ids)
@@ -236,18 +236,18 @@ class SupabaseClient:
             ]:
                 value = comment.get(key)
                 if isinstance(value, str) and "Fehler:" in value:
-                    questions_with_errors.add(comment["question_id"])
+                    questions_with_errors.add(str(comment["question_id"]))
                     break
 
         existing_question_ids = {
-            *(c["question_id"] for c in (existing_comments or [])),
-            *(s["question_id"] for s in (existing_summaries or [])),
+            *(str(c["question_id"]) for c in (existing_comments or [])),
+            *(str(s["question_id"]) for s in (existing_summaries or [])),
         }
 
-        commentary_only_ids = {q["id"] for q in commentary_only_questions or []}
+        commentary_only_ids = {str(q["id"]) for q in commentary_only_questions or []}
 
-        ids_to_process_raw: List[int] = []
-        ids_to_cleanup: List[int] = []
+        ids_to_process_raw: List[str] = []
+        ids_to_cleanup: List[str] = []
 
         for qid in candidate_ids:
             if qid in existing_question_ids:
@@ -267,7 +267,7 @@ class SupabaseClient:
     # Claiming & status updates
     # -------------------------------------------------------------------------
 
-    async def cleanup_completed(self, ids_to_cleanup: List[int]) -> None:
+    async def cleanup_completed(self, ids_to_cleanup: List[str]) -> None:
         if not ids_to_cleanup:
             return
         
@@ -281,7 +281,7 @@ class SupabaseClient:
 
         await self._run_sync(_cleanup)
 
-    async def claim_questions(self, ids_to_process: List[int]) -> List[Dict[str, Any]]:
+    async def claim_questions(self, ids_to_process: List[str]) -> List[Dict[str, Any]]:
         if not ids_to_process:
             return []
         
@@ -304,7 +304,7 @@ class SupabaseClient:
 
     async def check_all_models_completed(
         self,
-        question_id: int,
+        question_id: str,
         models_enabled: Dict[str, Any],
     ) -> bool:
         """
@@ -363,7 +363,7 @@ class SupabaseClient:
 
     async def update_question_status(
         self,
-        question_id: int,
+        question_id: str,
         status: str,
         set_processed_at: bool = False,
     ) -> None:
@@ -386,7 +386,7 @@ class SupabaseClient:
 
     async def upsert_comments(
         self,
-        question_id: int,
+        question_id: str,
         answer_comments: Dict[str, Any],
     ) -> None:
         """
@@ -479,7 +479,7 @@ class SupabaseClient:
         self,
         provider: str,
         batch_id: str,
-        question_ids: List[int],
+        question_ids: List[str],
         input_file_id: Optional[str] = None,
     ) -> None:
         """

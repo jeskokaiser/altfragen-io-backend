@@ -165,18 +165,18 @@ def build_prompt(question: Dict[str, Any]) -> str:
 def build_batch_jsonl(
     questions: Iterable[Dict[str, Any]],
     model: str = "gpt-5.1",
-) -> Tuple[Path, List[int]]:
+) -> Tuple[Path, List[str]]:
     """
     Build a temporary JSONL file for the OpenAI Batch API and return the path
     plus the ordered list of question IDs used.
     """
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl")
     path = Path(tmp.name)
-    question_ids: List[int] = []
+    question_ids: List[str] = []
 
     try:
         for q in questions:
-            qid = int(q["id"])
+            qid = str(q["id"])  # Handle UUIDs as strings
             question_ids.append(qid)
             prompt = build_prompt(q)
             body = {
@@ -207,7 +207,7 @@ def build_batch_jsonl(
 def submit_batch(
     questions: Iterable[Dict[str, Any]],
     client: Optional[OpenAI] = None,
-) -> Tuple[str, str, List[int]]:
+) -> Tuple[str, str, List[str]]:
     """
     Create an OpenAI Batch job for the given questions.
 
@@ -231,7 +231,7 @@ def submit_batch(
     return batch.id, batch_input_file.id, question_ids
 
 
-def parse_batch_output_line(line: str) -> Tuple[int, Dict[str, Any], bool]:
+def parse_batch_output_line(line: str) -> Tuple[str, Dict[str, Any], bool]:
     """
     Parse a single JSONL line from the batch output file.
 
@@ -241,7 +241,7 @@ def parse_batch_output_line(line: str) -> Tuple[int, Dict[str, Any], bool]:
     custom_id = obj.get("custom_id", "")
     if not custom_id.startswith("q-"):
         raise ValueError(f"Unexpected custom_id: {custom_id}")
-    qid = int(custom_id.split("-", 1)[1])
+    qid = custom_id.split("-", 1)[1]  # Extract UUID string, not int
 
     error = obj.get("error")
     if error:
@@ -270,14 +270,14 @@ def parse_batch_output_line(line: str) -> Tuple[int, Dict[str, Any], bool]:
 def load_batch_results(
     client: OpenAI,
     output_file_id: str,
-) -> Dict[int, Dict[str, Any]]:
+) -> Dict[str, Dict[str, Any]]:
     """
     Download and parse the batch output file into a mapping:
     question_id -> commentary dict (or error info).
     """
     file_response = client.files.content(output_file_id)
     text = file_response.text
-    results: Dict[int, Dict[str, Any]] = {}
+    results: Dict[str, Dict[str, Any]] = {}
     for line in text.splitlines():
         if not line.strip():
             continue

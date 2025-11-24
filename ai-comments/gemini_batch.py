@@ -90,11 +90,11 @@ JSON_SCHEMA: Dict[str, Any] = {
 
 def build_inline_requests(
     questions: Iterable[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[int]]:
+) -> Tuple[List[Dict[str, Any]], List[str]]:
     inline_requests: List[Dict[str, Any]] = []
-    question_ids: List[int] = []
+    question_ids: List[str] = []
     for q in questions:
-        qid = int(q["id"])
+        qid = str(q["id"])  # Handle UUIDs as strings
         question_ids.append(qid)
         prompt = build_prompt(q)
         inline_requests.append(
@@ -120,7 +120,7 @@ def submit_batch(
     questions: Iterable[Dict[str, Any]],
     client: "genai.Client | None" = None,
     model: str = "models/gemini-2.5-flash",
-) -> Tuple[str, List[int]]:
+) -> Tuple[str, List[str]]:
     """
     Create a Gemini Batch job using inline requests.
 
@@ -142,13 +142,13 @@ def submit_batch(
 
 def parse_inline_responses(
     batch_job: Any,
-    original_question_ids: List[int],
-) -> Dict[int, Dict[str, Any]]:
+    original_question_ids: List[str],
+) -> Dict[str, Dict[str, Any]]:
     """
     Given a finished batch_job with inlined_responses, map them back to
     question IDs and return a dict question_id -> commentary dict (or error).
     """
-    results: Dict[int, Dict[str, Any]] = {}
+    results: Dict[str, Dict[str, Any]] = {}
     dest = getattr(batch_job, "dest", None)
     inlined = getattr(dest, "inlined_responses", None) if dest else None
     if not inlined:
