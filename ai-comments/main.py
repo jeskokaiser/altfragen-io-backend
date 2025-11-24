@@ -7,17 +7,10 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 import uvicorn
 
-# Import the main functions
-# These modules are in the same package, so we can import them directly
-# The relative imports within those modules will work because this directory
-# is treated as a package (has __init__.py)
-try:
-    # Try package-style import first (when run as module)
-    from . import ai_commentary_submit, ai_commentary_consume
-except ImportError:
-    # Fallback for direct script execution
-    import ai_commentary_submit
-    import ai_commentary_consume
+# Import the main functions using absolute imports
+# PYTHONPATH is set to /app in Dockerfile, so we can import directly
+import ai_commentary_submit
+import ai_commentary_consume
 
 submit_main = ai_commentary_submit.main
 consume_main = ai_commentary_consume.main

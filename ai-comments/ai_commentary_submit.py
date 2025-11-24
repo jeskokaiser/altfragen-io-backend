@@ -6,12 +6,12 @@ from openai import OpenAI
 from google import genai
 from mistralai import Mistral
 
-from .supabase_client import SupabaseClient
-from .openai_batch import submit_batch as submit_openai_batch
-from .gemini_batch import submit_batch as submit_gemini_batch
-from .mistral_batch import submit_batch as submit_mistral_batch
-from .perplexity_instant import generate_commentary as generate_perplexity_commentary
-from .deepseek_instant import generate_commentary as generate_deepseek_commentary
+from supabase_client import SupabaseClient
+from openai_batch import submit_batch as submit_openai_batch
+from gemini_batch import submit_batch as submit_gemini_batch
+from mistral_batch import submit_batch as submit_mistral_batch
+from perplexity_instant import generate_commentary as generate_perplexity_commentary
+from deepseek_instant import generate_commentary as generate_deepseek_commentary
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

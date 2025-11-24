@@ -6,10 +6,10 @@ from openai import OpenAI
 from google import genai
 from mistralai import Mistral
 
-from .supabase_client import SupabaseClient
-from .openai_batch import load_batch_results
-from .gemini_batch import parse_inline_responses
-from .mistral_batch import parse_results_file
+from supabase_client import SupabaseClient
+from openai_batch import load_batch_results
+from gemini_batch import parse_inline_responses
+from mistral_batch import parse_results_file
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
