@@ -3,21 +3,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from google import genai
 
-
-def build_prompt(question: Dict[str, Any]) -> str:
-    return (
-        "Analysiere diese Multiple-Choice-Frage und erstelle Kommentare für jede "
-        "Antwortmöglichkeit:\n\n"
-        f"Frage: {question.get('question')}\n"
-        f"A) {question.get('option_a')}\n"
-        f"B) {question.get('option_b')}\n"
-        f"C) {question.get('option_c')}\n"
-        f"D) {question.get('option_d')}\n"
-        f"E) {question.get('option_e')}\n\n"
-        "Erstelle:\n"
-        "1. Einen kurzen, aber gehaltvollen Überblick (3–5 Sätze)...\n"
-        "2. Kommentar für jede Antwortoption (A–E)...\n"
-    )
+from .prompts import SYSTEM_PROMPT_WITH_REGENERATING, build_user_prompt
 
 
 JSON_SCHEMA: Dict[str, Any] = {
@@ -96,12 +82,13 @@ def build_inline_requests(
     for q in questions:
         qid = str(q["id"])  # Handle UUIDs as strings
         question_ids.append(qid)
-        prompt = build_prompt(q)
+        # Combine system prompt and user prompt for Gemini
+        full_prompt = f"{SYSTEM_PROMPT_WITH_REGENERATING.strip()}\n\n{build_user_prompt(q)}"
         inline_requests.append(
             {
                 "contents": [
                     {
-                        "parts": [{"text": prompt}],
+                        "parts": [{"text": full_prompt}],
                         "role": "user",
                     }
                 ],

@@ -168,16 +168,10 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
 
     for job in jobs:
         job_id = job["batch_id"]
-        logger.info("Checking Mistral batch %s", job_id)
         batch_job = client.batch.jobs.get(job_id=job_id)
         status = batch_job.status
-        logger.info(f"Mistral batch {job_id} status: {status}")
-        logger.info(f"Batch job details: total_requests={getattr(batch_job, 'total_requests', 'N/A')}, "
-                   f"succeeded_requests={getattr(batch_job, 'succeeded_requests', 'N/A')}, "
-                   f"failed_requests={getattr(batch_job, 'failed_requests', 'N/A')}")
         
         if status in {"QUEUED", "RUNNING"}:
-            logger.info("Mistral batch %s still in status %s", job_id, status)
             continue
 
         if status != "SUCCESS":
@@ -200,36 +194,15 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
             continue
 
         # Download results into a temporary file
-        logger.info(f"Downloading Mistral batch output file {output_file_id}")
         output_stream = client.files.download(file_id=output_file_id)
         tmp_dir = Path(tempfile.mkdtemp())
         result_path = tmp_dir / f"mistral_{job_id}.jsonl"
         
-        bytes_written = 0
         with result_path.open("wb") as f:
             for chunk in output_stream.stream:
                 f.write(chunk)
-                bytes_written += len(chunk)
-        
-        logger.info(f"Downloaded {bytes_written} bytes to {result_path}")
-        logger.info(f"File size: {result_path.stat().st_size} bytes")
-        
-        # Log first few lines for debugging
-        with result_path.open("r", encoding="utf-8") as f:
-            first_lines = [f.readline() for _ in range(3)]
-            logger.info(f"First 3 lines of output file (raw):\n{''.join(first_lines)}")
-            # Try to parse and show structure
-            for i, line in enumerate(first_lines, 1):
-                if line.strip():
-                    try:
-                        parsed = json.loads(line)
-                        logger.info(f"Line {i} parsed structure (keys): {list(parsed.keys())}")
-                        logger.debug(f"Line {i} full structure: {json.dumps(parsed, indent=2, default=str)[:2000]}")
-                    except Exception as e:
-                        logger.warning(f"Line {i} could not be parsed: {e}")
 
         results = parse_results_file(result_path)
-        logger.info(f"Parsed {len(results)} results from batch output")
         success_count = 0
         error_count = 0
         
@@ -241,11 +214,7 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
                 continue
             
             try:
-                logger.debug(f"Upserting Mistral comments for question {qid}")
-                logger.info(f"Question {qid}: payload chosen_answer={repr(payload.get('chosen_answer'))} (type: {type(payload.get('chosen_answer')).__name__})")
-                logger.debug(f"Question {qid}: full payload keys: {list(payload.keys())}")
                 await supabase.upsert_comments(qid, {"mistral": payload})
-                logger.debug(f"Successfully upserted comments for question {qid}")
                 
                 # Check if all enabled models have completed before marking as completed
                 if await supabase.check_all_models_completed(qid, models_enabled):

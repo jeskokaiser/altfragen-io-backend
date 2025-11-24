@@ -8,57 +8,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from mistralai import File, Mistral
 
-
-SYSTEM_PROMPT = """
-Du bist ein hochqualifizierter medizinischer Fachexperte und Prüfer für Multiple-Choice-Fragen (MC-Fragen) nach Universitäts- und IMPP-Standard. Du analysierst klinisch-theoretische Inhalte präzise, begründest deine Entscheidungen logisch und erkennst typische Prüfungsfallen.
-Die Nutzereingabe enthält IMMER genau EINE Multiple-Choice-Frage mit den Antwortoptionen A–E (teilweise können Formulierungen unvollständig, unklar oder sprachlich holprig sein). Du kennst NICHT die offiziell richtige Antwort aus einer Datenbank, sondern entscheidest ausschließlich anhand des übergebenen Fragentextes und der Antwortoptionen.
-
-DEINE GESAMTE ANTWORT MUSS IMMER im folgenden JSON-Format vorliegen:
-{
-  "chosen_answer": "Ein Buchstabe von A bis E, der die deiner Meinung nach beste Antwort beschreibt",
-  "general_comment": "Allgemeiner Kommentar zur Frage",
-  "comment_a": "Kurzer Kommentar zu Antwort A",
-  "comment_b": "Kurzer Kommentar zu Antwort B",
-  "comment_c": "Kurzer Kommentar zu Antwort C",
-  "comment_d": "Kurzer Kommentar zu Antwort D",
-  "comment_e": "Kurzer Kommentar zu Antwort E"
-}
-
-STRIKTE VORGABEN:
-
-1. JSON-Format
-- Antworte AUSNAHMSLOS mit genau EINEM JSON-Objekt.
-- KEIN zusätzlicher Text vor oder nach dem JSON (keine Erklärungen, keine Kommentare, kein Markdown).
-- Verwende GENAU die oben angegebenen Schlüsselnamen, unverändert.
-- Verwende doppelte Anführungszeichen für alle Strings.
-- Keine Kommentare, keine nachgestellten Kommata.
-- Achte besonders darauf, dass alle Strings innerhalb des JSON (z.B. Kommentare) korrekt JSON-escaped sind (z.B. Zeilenumbrüche als \\n, Anführungszeichen als \\").
-
-2. Auswahl der besten Antwort ("chosen_answer")
-- Wähle GENAU EINE beste Antwort von "A" bis "E".
-- Nutze als Wert ausschließlich einen einzelnen Großbuchstaben: "A", "B", "C", "D" oder "E".
-- Wenn mehrere Antworten plausibel erscheinen, wähle die fachlich am besten begründbare Option und entscheide dich eindeutig.
-
-3. Inhaltliche Anforderungen
-- "general_comment":
-  - Kurze, präzise Zusammenfassung der Lernziele/Schwerpunkte der Frage.
-  - Ordne die Frage in den medizinischen Kontext ein (z. B. Fachgebiet, Pathophysiologie, Klinik, Pharmakologie).
-  - Hebe typische Stolperfallen oder prüfungsrelevante Aspekte hervor.
-
-- "comment_a" bis "comment_e":
-  - Erkläre jeweils spezifisch, WARUM die Antwort richtig oder falsch ist.
-  - Gehe, wenn sinnvoll, kurz auf typische Fehlvorstellungen oder nahe liegende Alternativen ein.
-  - Nutze klare, fachlich korrekte, aber kompakte Formulierungen.
-  - Verwende keine Formulierungen wie "siehe oben", sondern mache jede Erklärung eigenständig verständlich.
-
-4. Allgemeine Regeln
-- Arbeite streng evidenz- und leitlinienorientiert, so wie es für medizinische Staatsexamina und Universitätsprüfungen üblich ist.
-- Wenn Informationen im Fragentext unklar sind, treffe die plausibelste fachliche Annahme und begründe implizit in deinen Kommentaren.
-- Erfinde KEINE Zusatzinformationen, die dem Fragentext klar widersprechen würden.
-- Schreibe alle Texte auf Deutsch.
-
-Erinnere dich: Deine Antwort besteht ausschließlich aus dem beschriebenen JSON-Objekt, ohne weiteren Text.
-"""
+from .prompts import SYSTEM_PROMPT_WITHOUT_REGENERATING, build_user_prompt
 
 
 # Mistral's JSON schema format requires name and schema fields
@@ -110,19 +60,7 @@ JSON_SCHEMA: Dict[str, Any] = {
 }
 
 
-def build_prompt(question: Dict[str, Any]) -> str:
-    return (
-        "Analysiere diese Multiple-Choice-Frage und erstelle Kommentare für jede "
-        "Antwortmöglichkeit als JSON-Objekt mit den Feldern "
-        "chosen_answer, general_comment, comment_a, comment_b, comment_c, "
-        "comment_d, comment_e:\n\n"
-        f"Frage: {question.get('question')}\n"
-        f"A) {question.get('option_a')}\n"
-        f"B) {question.get('option_b')}\n"
-        f"C) {question.get('option_c')}\n"
-        f"D) {question.get('option_d')}\n"
-        f"E) {question.get('option_e')}\n"
-    )
+# build_prompt is now imported from prompts module
 
 
 def build_batch_file(
@@ -153,18 +91,18 @@ def build_batch_file(
         # Mistral batch format as per documentation
         # Include system prompt and JSON schema for structured output
         request = {
-            "custom_id": custom_id,
-            "body": {
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT.strip(),
-                    },
-                    {
-                        "role": "user",
-                        "content": build_prompt(q),
-                    }
-                ],
+                "custom_id": custom_id,
+                "body": {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": SYSTEM_PROMPT_WITHOUT_REGENERATING.strip(),
+                        },
+                        {
+                            "role": "user",
+                            "content": build_user_prompt(q),
+                        }
+                    ],
                 "max_tokens": 4096,
                 "response_format": {
                     "type": "json_schema",
@@ -230,14 +168,12 @@ def submit_batch(
     # Approach 1: Try raw API with explicit batch purpose
     with httpx.Client() as http_client:
         try:
-            logger.info("Attempting to upload batch file with purpose=batch")
             response = http_client.post(
                 'https://api.mistral.ai/v1/files',
                 headers=headers,
                 files=files,
                 data={'purpose': 'batch'}
             )
-            logger.info(f"Upload response status: {response.status_code}")
             if response.status_code in [200, 201]:
                 batch_data_dict = response.json()
                 class FileResponse:
@@ -245,25 +181,20 @@ def submit_batch(
                         self.id = id
                 batch_data = FileResponse(batch_data_dict.get('id'))
                 file_uploaded = True
-                logger.info(f"Successfully uploaded batch file with ID: {batch_data.id}")
             else:
-                logger.warning(f"Upload failed with status {response.status_code}: {response.text}")
                 last_error = f"HTTP {response.status_code}: {response.text}"
         except Exception as e:
-            logger.warning(f"Raw API with purpose=batch failed: {e}")
             last_error = str(e)
     
     # Approach 2: Try without purpose parameter  
     if not file_uploaded:
         with httpx.Client() as http_client:
             try:
-                logger.info("Attempting to upload batch file without purpose parameter")
                 response = http_client.post(
                     'https://api.mistral.ai/v1/files',
                     headers=headers,
                     files=files
                 )
-                logger.info(f"Upload response status: {response.status_code}")
                 if response.status_code in [200, 201]:
                     batch_data_dict = response.json()
                     class FileResponse:
@@ -271,23 +202,18 @@ def submit_batch(
                             self.id = id
                     batch_data = FileResponse(batch_data_dict.get('id'))
                     file_uploaded = True
-                    logger.info(f"Successfully uploaded batch file with ID: {batch_data.id}")
                 else:
-                    logger.warning(f"Upload failed with status {response.status_code}: {response.text}")
                     last_error = f"HTTP {response.status_code}: {response.text}"
             except Exception as e:
-                logger.warning(f"Raw API without purpose failed: {e}")
                 last_error = str(e)
     
     # Approach 3: Last resort - use SDK (will likely fail with validation error)
     if not file_uploaded:
-        logger.info("Falling back to SDK file upload method")
         try:
             file_obj = File(file_name="batch_input.jsonl", content=file_content)
             batch_data = client.files.upload(file=file_obj)
-            logger.info(f"Successfully uploaded batch file with SDK, ID: {batch_data.id}")
         except Exception as e:
-            logger.error(f"SDK upload failed: {e}")
+            logger.error(f"Failed to upload batch file to Mistral: {e}")
             # Re-raise with more context
             raise RuntimeError(f"Failed to upload batch file to Mistral. Last error: {last_error or e}") from e
 
@@ -335,13 +261,7 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                 obj = json.loads(line)
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse line {line_num} as JSON: {e}")
-                logger.debug(f"Line content: {line[:200]}...")
                 continue
-            
-            # Log first line structure for debugging
-            if line_num == 1:
-                logger.info(f"First line structure (keys): {list(obj.keys())}")
-                logger.debug(f"First line full structure: {json.dumps(obj, indent=2, default=str)[:1000]}...")
                 
             custom_id = obj.get("custom_id", "")
             if not custom_id.startswith("q-"):
@@ -359,29 +279,16 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
             # Parse response structure
             response = obj.get("response")
             if not response:
-                logger.warning(f"Question {qid}: no 'response' field in result. Keys: {list(obj.keys())}")
-                logger.debug(f"Full object structure: {json.dumps(obj, indent=2, default=str)[:2000]}")
                 results[qid] = {"error": "no response field"}
                 continue
                 
-            # Log response structure for debugging
-            logger.debug(f"Question {qid}: response type={type(response)}")
             if isinstance(response, dict):
-                logger.debug(f"Question {qid}: response keys: {list(response.keys())}")
                 body = response.get("body") or response
             else:
-                logger.debug(f"Question {qid}: response is not a dict: {type(response)}")
                 body = response
-                
-            if isinstance(body, dict):
-                logger.debug(f"Question {qid}: body keys: {list(body.keys())}")
-            else:
-                logger.debug(f"Question {qid}: body is not a dict: {type(body)}")
                 
             choices = body.get("choices") or []
             if not choices:
-                logger.warning(f"Question {qid}: no choices in response. Body keys: {list(body.keys()) if isinstance(body, dict) else 'not a dict'}")
-                logger.debug(f"Question {qid}: Full response structure: {json.dumps(response, indent=2, default=str)[:2000]}")
                 results[qid] = {"error": "no choices"}
                 continue
                 
@@ -389,15 +296,8 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
             content = message.get("content")
             
             if not content:
-                logger.warning(f"Question {qid}: no content in message. Message keys: {list(message.keys())}")
-                logger.debug(f"Full message object: {json.dumps(message, indent=2)}")
                 results[qid] = {"error": "no content"}
                 continue
-            
-            # Log content details for debugging
-            logger.debug(f"Question {qid}: content type={type(content)}, length={len(str(content)) if content else 0}")
-            if content:
-                logger.debug(f"Question {qid}: content preview (first 500 chars): {str(content)[:500]}")
             
             # Parse JSON content
             # Mistral often returns JSON wrapped in markdown code blocks, so we need to extract it
@@ -419,7 +319,6 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                     if code_block_match:
                         # Extract content between code block markers
                         json_str = code_block_match.group(1).strip()
-                        logger.debug(f"Question {qid}: extracted JSON from markdown code block")
                         commentary = json.loads(json_str)
                     else:
                         # Try to find JSON object directly in the text
@@ -430,11 +329,9 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                         if json_matches:
                             # Try to parse the largest match (likely the main JSON object)
                             json_str = max(json_matches, key=len)
-                            logger.debug(f"Question {qid}: extracted JSON object from text")
                             commentary = json.loads(json_str)
                         else:
                             # Last resort: try parsing the whole content as JSON
-                            logger.debug(f"Question {qid}: attempting to parse entire content as JSON")
                             commentary = json.loads(content_stripped)
                 else:
                     logger.error(f"Question {qid}: unexpected content type: {type(content)}")
@@ -442,13 +339,8 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                     continue
                     
                 results[qid] = commentary
-                # Log the chosen_answer value for debugging
-                chosen_answer = commentary.get("chosen_answer")
-                logger.info(f"Question {qid}: parsed commentary with chosen_answer={repr(chosen_answer)} (type: {type(chosen_answer).__name__})")
-                logger.debug(f"Question {qid}: full parsed commentary keys: {list(commentary.keys())}")
             except json.JSONDecodeError as exc:
                 logger.error(f"Question {qid}: failed to parse content as JSON: {exc}")
-                logger.error(f"Content (first 500 chars): {str(content)[:500]}")
                 # Try one more time with a more aggressive extraction
                 try:
                     # Try to find any JSON-like structure
@@ -457,11 +349,9 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                         json_str = json_match.group(0)
                         commentary = json.loads(json_str)
                         results[qid] = commentary
-                        logger.info(f"Question {qid}: successfully extracted JSON on retry")
                     else:
                         results[qid] = {"error": f"parse error: {exc}"}
-                except Exception as retry_exc:
-                    logger.error(f"Question {qid}: retry also failed: {retry_exc}")
+                except Exception:
                     results[qid] = {"error": f"parse error: {exc}"}
             except Exception as exc:
                 logger.error(f"Question {qid}: unexpected error parsing content: {exc}", exc_info=True)
