@@ -1,0 +1,38 @@
+services:
+  altfragen_parser:
+    build: ./app       # ggf. in ./parser o.Ä. umbenennen
+    container_name: altfragen_parser
+    env_file: .env
+    volumes:
+      - ./app:/app
+    networks:
+      - backend
+
+  altfragen_ai:
+    build: ./ai        # Ordner für deinen AI-Container
+    container_name: altfragen_ai
+    env_file: .env.ai  # optional eigene Env-Datei
+    volumes:
+      - ./ai:/app
+    networks:
+      - backend
+
+  caddy:
+    image: caddy:2
+    container_name: caddy_reverse_proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - backend
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  backend:

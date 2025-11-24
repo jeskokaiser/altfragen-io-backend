@@ -1,0 +1,20 @@
+# ENV
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Caddy Volumes
+caddy_data/
+caddy_config/
+
+# Docker artifacts
+*.log
+
+# Local editor backups
+*~__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
