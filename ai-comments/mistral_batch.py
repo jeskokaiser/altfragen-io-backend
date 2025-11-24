@@ -30,7 +30,7 @@ def build_batch_file(
     """
     Build an in-memory JSONL batch file as described in the Mistral docs.
     Mistral batch API expects each line to be: {"custom_id": "...", "body": {...}}
-    The body contains the actual request body (messages, max_tokens, etc.)
+    The body contains the actual request parameters (messages, max_tokens, etc.)
     """
     buffer = BytesIO()
     question_ids: List[str] = []
@@ -38,8 +38,9 @@ def build_batch_file(
     for idx, q in enumerate(questions):
         qid = str(q["id"])  # Handle UUIDs as strings
         question_ids.append(qid)
-        # Mistral batch API format: only custom_id and body
-        # The body contains the actual chat completions request
+        # Mistral batch API format: just custom_id and body
+        # The body contains the actual chat completions request parameters
+        # Note: model is NOT included in the body, it's passed to batch.jobs.create
         request = {
             "custom_id": f"q-{qid}",
             "body": {
