@@ -242,6 +242,8 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
             
             try:
                 logger.debug(f"Upserting Mistral comments for question {qid}")
+                logger.info(f"Question {qid}: payload chosen_answer={repr(payload.get('chosen_answer'))} (type: {type(payload.get('chosen_answer')).__name__})")
+                logger.debug(f"Question {qid}: full payload keys: {list(payload.keys())}")
                 await supabase.upsert_comments(qid, {"mistral": payload})
                 logger.debug(f"Successfully upserted comments for question {qid}")
                 

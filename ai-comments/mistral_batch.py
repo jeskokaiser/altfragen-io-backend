@@ -9,6 +9,103 @@ from typing import Any, Dict, Iterable, List, Tuple
 from mistralai import File, Mistral
 
 
+SYSTEM_PROMPT = """
+Du bist ein hochqualifizierter medizinischer Fachexperte und Prüfer für Multiple-Choice-Fragen (MC-Fragen) nach Universitäts- und IMPP-Standard. Du analysierst klinisch-theoretische Inhalte präzise, begründest deine Entscheidungen logisch und erkennst typische Prüfungsfallen.
+Die Nutzereingabe enthält IMMER genau EINE Multiple-Choice-Frage mit den Antwortoptionen A–E (teilweise können Formulierungen unvollständig, unklar oder sprachlich holprig sein). Du kennst NICHT die offiziell richtige Antwort aus einer Datenbank, sondern entscheidest ausschließlich anhand des übergebenen Fragentextes und der Antwortoptionen.
+
+DEINE GESAMTE ANTWORT MUSS IMMER im folgenden JSON-Format vorliegen:
+{
+  "chosen_answer": "Ein Buchstabe von A bis E, der die deiner Meinung nach beste Antwort beschreibt",
+  "general_comment": "Allgemeiner Kommentar zur Frage",
+  "comment_a": "Kurzer Kommentar zu Antwort A",
+  "comment_b": "Kurzer Kommentar zu Antwort B",
+  "comment_c": "Kurzer Kommentar zu Antwort C",
+  "comment_d": "Kurzer Kommentar zu Antwort D",
+  "comment_e": "Kurzer Kommentar zu Antwort E"
+}
+
+STRIKTE VORGABEN:
+
+1. JSON-Format
+- Antworte AUSNAHMSLOS mit genau EINEM JSON-Objekt.
+- KEIN zusätzlicher Text vor oder nach dem JSON (keine Erklärungen, keine Kommentare, kein Markdown).
+- Verwende GENAU die oben angegebenen Schlüsselnamen, unverändert.
+- Verwende doppelte Anführungszeichen für alle Strings.
+- Keine Kommentare, keine nachgestellten Kommata.
+- Achte besonders darauf, dass alle Strings innerhalb des JSON (z.B. Kommentare) korrekt JSON-escaped sind (z.B. Zeilenumbrüche als \\n, Anführungszeichen als \\").
+
+2. Auswahl der besten Antwort ("chosen_answer")
+- Wähle GENAU EINE beste Antwort von "A" bis "E".
+- Nutze als Wert ausschließlich einen einzelnen Großbuchstaben: "A", "B", "C", "D" oder "E".
+- Wenn mehrere Antworten plausibel erscheinen, wähle die fachlich am besten begründbare Option und entscheide dich eindeutig.
+
+3. Inhaltliche Anforderungen
+- "general_comment":
+  - Kurze, präzise Zusammenfassung der Lernziele/Schwerpunkte der Frage.
+  - Ordne die Frage in den medizinischen Kontext ein (z. B. Fachgebiet, Pathophysiologie, Klinik, Pharmakologie).
+  - Hebe typische Stolperfallen oder prüfungsrelevante Aspekte hervor.
+
+- "comment_a" bis "comment_e":
+  - Erkläre jeweils spezifisch, WARUM die Antwort richtig oder falsch ist.
+  - Gehe, wenn sinnvoll, kurz auf typische Fehlvorstellungen oder nahe liegende Alternativen ein.
+  - Nutze klare, fachlich korrekte, aber kompakte Formulierungen.
+  - Verwende keine Formulierungen wie "siehe oben", sondern mache jede Erklärung eigenständig verständlich.
+
+4. Allgemeine Regeln
+- Arbeite streng evidenz- und leitlinienorientiert, so wie es für medizinische Staatsexamina und Universitätsprüfungen üblich ist.
+- Wenn Informationen im Fragentext unklar sind, treffe die plausibelste fachliche Annahme und begründe implizit in deinen Kommentaren.
+- Erfinde KEINE Zusatzinformationen, die dem Fragentext klar widersprechen würden.
+- Schreibe alle Texte auf Deutsch.
+
+Erinnere dich: Deine Antwort besteht ausschließlich aus dem beschriebenen JSON-Objekt, ohne weiteren Text.
+"""
+
+
+JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chosen_answer": {
+            "type": "string",
+            "description": "Ein Buchstabe von A bis E für die gewählte beste Antwort",
+        },
+        "general_comment": {
+            "type": "string",
+            "description": "Allgemeiner Kommentar zur Frage",
+        },
+        "comment_a": {
+            "type": "string",
+            "description": "Kurzer Kommentar zu Antwort A",
+        },
+        "comment_b": {
+            "type": "string",
+            "description": "Kurzer Kommentar zu Antwort B",
+        },
+        "comment_c": {
+            "type": "string",
+            "description": "Kurzer Kommentar zu Antwort C",
+        },
+        "comment_d": {
+            "type": "string",
+            "description": "Kurzer Kommentar zu Antwort D",
+        },
+        "comment_e": {
+            "type": "string",
+            "description": "Kurzer Kommentar zu Antwort E",
+        },
+    },
+    "required": [
+        "chosen_answer",
+        "general_comment",
+        "comment_a",
+        "comment_b",
+        "comment_c",
+        "comment_d",
+        "comment_e",
+    ],
+    "additionalProperties": False,
+}
+
+
 def build_prompt(question: Dict[str, Any]) -> str:
     return (
         "Analysiere diese Multiple-Choice-Frage und erstelle Kommentare für jede "
@@ -50,16 +147,25 @@ def build_batch_file(
         custom_id_mapping[idx] = custom_id
         
         # Mistral batch format as per documentation
+        # Include system prompt and JSON schema for structured output
         request = {
             "custom_id": custom_id,
             "body": {
                 "messages": [
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT.strip(),
+                    },
                     {
                         "role": "user",
                         "content": build_prompt(q),
                     }
                 ],
                 "max_tokens": 4096,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": JSON_SCHEMA,
+                },
             },
         }
         buffer.write(json.dumps(request).encode("utf-8"))
@@ -302,13 +408,13 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                         continue
                     
                     # Try to extract JSON from markdown code blocks
-                    # Pattern to match ```json ... ``` blocks
-                    json_block_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
-                    matches = re.findall(json_block_pattern, content_stripped, re.DOTALL)
+                    # Pattern to match ```json ... ``` blocks (match everything between markers)
+                    code_block_pattern = r'```(?:json)?\s*(.*?)\s*```'
+                    code_block_match = re.search(code_block_pattern, content_stripped, re.DOTALL)
                     
-                    if matches:
-                        # Use the first JSON block found
-                        json_str = matches[0]
+                    if code_block_match:
+                        # Extract content between code block markers
+                        json_str = code_block_match.group(1).strip()
                         logger.debug(f"Question {qid}: extracted JSON from markdown code block")
                         commentary = json.loads(json_str)
                     else:
@@ -332,7 +438,10 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                     continue
                     
                 results[qid] = commentary
-                logger.debug(f"Successfully parsed commentary for question {qid}")
+                # Log the chosen_answer value for debugging
+                chosen_answer = commentary.get("chosen_answer")
+                logger.info(f"Question {qid}: parsed commentary with chosen_answer={repr(chosen_answer)} (type: {type(chosen_answer).__name__})")
+                logger.debug(f"Question {qid}: full parsed commentary keys: {list(commentary.keys())}")
             except json.JSONDecodeError as exc:
                 logger.error(f"Question {qid}: failed to parse content as JSON: {exc}")
                 logger.error(f"Content (first 500 chars): {str(content)[:500]}")
