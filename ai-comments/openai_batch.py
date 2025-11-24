@@ -1,7 +1,7 @@
 import json
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from openai import OpenAI
 
@@ -213,8 +213,6 @@ def submit_batch(
 
     Returns (batch_id, input_file_id, question_ids).
     """
-    from typing import Optional as _Optional  # avoid mypy confusion if used
-
     if client is None:
         client = OpenAI()
 
