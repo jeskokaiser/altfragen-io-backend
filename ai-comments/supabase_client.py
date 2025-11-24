@@ -286,11 +286,17 @@ class SupabaseClient:
             return []
         
         def _claim():
+            # Update the questions first (only update those that are pending or processing)
+            self._client.table("questions").update({
+                "ai_commentary_status": "processing"
+            }).in_("id", ids_to_process).in_("ai_commentary_status", ["pending", "processing"]).execute()
+            
+            # Then fetch the updated questions
             return (
                 self._client.table("questions")
-                .update({"ai_commentary_status": "processing"})
-                .in_("id", ids_to_process)
                 .select("*")
+                .in_("id", ids_to_process)
+                .eq("ai_commentary_status", "processing")
                 .execute()
             ).data
 
