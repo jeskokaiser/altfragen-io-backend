@@ -10,8 +10,8 @@ from supabase_client import SupabaseClient
 from openai_batch import submit_batch as submit_openai_batch
 from gemini_batch import submit_batch as submit_gemini_batch
 from mistral_batch import submit_batch as submit_mistral_batch
-from perplexity_instant import generate_commentary as generate_perplexity_commentary
-from deepseek_instant import generate_commentary as generate_deepseek_commentary
+from perplexity_instant import generate_commentary as generate_perplexity_commentary, MODEL_VERSION as PERPLEXITY_MODEL_VERSION
+from deepseek_instant import generate_commentary as generate_deepseek_commentary, MODEL_VERSION as DEEPSEEK_MODEL_VERSION
 from pushover_notifier import get_notifier
 from quota_detector import is_quota_error, extract_quota_message
 
@@ -238,6 +238,12 @@ async def main() -> None:
                 results = await asyncio.gather(*tasks, return_exceptions=False)
 
                 # Process results
+                # Map model names to their versions (imported from model files)
+                model_versions = {
+                    "perplexity": PERPLEXITY_MODEL_VERSION,
+                    "deepseek": DEEPSEEK_MODEL_VERSION,
+                }
+                
                 for model_name, result in results:
                     if isinstance(result, Exception):
                         errors[model_name] = str(result)
@@ -251,11 +257,13 @@ async def main() -> None:
                             "comment_d": f"Fehler: {result}",
                             "comment_e": f"Fehler: {result}",
                             "processing_status": "failed",
+                            "model_version": model_versions.get(model_name),
                         }
                     else:
                         answer_comments[model_name] = {
                             **result,
                             "processing_status": "completed",
+                            "model_version": model_versions.get(model_name),
                         }
 
                 # Upsert comments to database (even if some models failed)

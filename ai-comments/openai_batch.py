@@ -8,6 +8,10 @@ from openai import OpenAI
 from prompts import SYSTEM_PROMPT_WITH_REGENERATING, build_user_prompt
 
 
+# Model version constant
+MODEL_VERSION = "gpt-5.1"
+
+
 JSON_SCHEMA: Dict[str, Any] = {
     "name": "answer_comments_with_choice_and_regen",
     "schema": {
@@ -85,7 +89,7 @@ JSON_SCHEMA: Dict[str, Any] = {
 
 def build_batch_jsonl(
     questions: Iterable[Dict[str, Any]],
-    model: str = "gpt-5.1",
+    model: str = MODEL_VERSION,
 ) -> Tuple[Path, List[str]]:
     """
     Build a temporary JSONL file for the OpenAI Batch API and return the path

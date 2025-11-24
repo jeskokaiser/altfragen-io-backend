@@ -11,6 +11,10 @@ from mistralai import File, Mistral
 from prompts import SYSTEM_PROMPT_WITHOUT_REGENERATING, build_user_prompt
 
 
+# Model version constant
+MODEL_VERSION = "mistral-medium-2508"
+
+
 # Mistral's JSON schema format requires name and schema fields
 JSON_SCHEMA: Dict[str, Any] = {
     "name": "answer_comments",
@@ -65,7 +69,7 @@ JSON_SCHEMA: Dict[str, Any] = {
 
 def build_batch_file(
     questions: Iterable[Dict[str, Any]],
-    model: str = "mistral-medium-latest",
+    model: str = MODEL_VERSION,
 ) -> Tuple[Path, List[str]]:
     """
     Build an in-memory JSONL batch file for Mistral batch API.
@@ -125,7 +129,7 @@ def build_batch_file(
 def submit_batch(
     questions: Iterable[Dict[str, Any]],
     client: "Mistral | None" = None,
-    model: str = "mistral-medium-latest",
+    model: str = MODEL_VERSION,
 ) -> Tuple[str, List[str]]:
     """
     Create a Mistral batch job from questions.

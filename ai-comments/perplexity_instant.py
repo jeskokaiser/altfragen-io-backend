@@ -8,6 +8,10 @@ import httpx
 from prompts import SYSTEM_PROMPT_WITHOUT_REGENERATING, build_user_prompt
 
 
+# Model version constant
+MODEL_VERSION = "sonar"
+
+
 logger = logging.getLogger("perplexity_instant")
 
 
@@ -32,7 +36,7 @@ async def generate_commentary(
                 "Content-Type": "application/json",
             },
             json={
-                "model": "sonar",
+                "model": MODEL_VERSION,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT_WITHOUT_REGENERATING.strip()},
                     {"role": "user", "content": build_user_prompt(question)},

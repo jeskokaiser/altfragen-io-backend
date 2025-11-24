@@ -329,10 +329,12 @@ class SupabaseClient:
         models_enabled: Dict[str, Any],
     ) -> bool:
         """
-        Check if all enabled models have completed commentary for a question.
+        Check if all enabled models have completed commentary for a question without errors.
 
-        Returns True if all enabled models have non-null general_comment fields
-        (and they don't contain "Fehler:").
+        Returns True if:
+        1. All enabled models have non-null general_comment fields
+        2. None of the comments contain "Fehler:" (error indicator)
+        3. All answers were successfully written to ai_answer_comments
         """
         def _check():
             response = (
@@ -340,7 +342,7 @@ class SupabaseClient:
                 .select(
                     "chatgpt_general_comment,gemini_new_general_comment,"
                     "mistral_general_comment,perplexity_general_comment,"
-                    "deepseek_general_comment"
+                    "deepseek_general_comment,processing_status"
                 )
                 .eq("question_id", question_id)
                 .limit(1)
@@ -353,6 +355,11 @@ class SupabaseClient:
             return False
 
         comment_row = data[0]
+
+        # Check processing_status - if it's "failed", return False
+        processing_status = comment_row.get("processing_status")
+        if processing_status == "failed":
+            return False
 
         # Map model names to database column names
         model_columns = {
@@ -398,6 +405,12 @@ class SupabaseClient:
                 ).isoformat()
 
             self._client.table("questions").update(payload).eq("id", question_id).execute()
+            
+            # If status is "completed", also update processing_status in ai_answer_comments
+            if status == "completed":
+                self._client.table("ai_answer_comments").update({
+                    "processing_status": "completed"
+                }).eq("question_id", question_id).execute()
 
         await self._run_sync(_update)
 
@@ -422,6 +435,8 @@ class SupabaseClient:
           "perplexity": {...} | None,
           "deepseek": {...} | None,
         }
+        
+        Each model dict can optionally include "model_version" key.
         """
         chatgpt = answer_comments.get("chatgpt") or {}
         gemini = answer_comments.get("gemini") or {}
@@ -429,6 +444,19 @@ class SupabaseClient:
         perplexity = answer_comments.get("perplexity") or {}
         deepseek = answer_comments.get("deepseek") or {}
 
+        # Check if any model in the current update has errors
+        # We'll determine the final processing_status after merging with existing data
+        has_errors_in_update = False
+        for model_data in [chatgpt, gemini, mistral, perplexity, deepseek]:
+            if model_data.get("processing_status") == "failed":
+                has_errors_in_update = True
+                break
+            # Also check for error strings in general_comment
+            general_comment = model_data.get("general_comment", "")
+            if isinstance(general_comment, str) and "Fehler:" in general_comment:
+                has_errors_in_update = True
+                break
+        
         payload: Dict[str, Any] = {
             "question_id": question_id,
             # ChatGPT (OpenAI / chatgpt)
@@ -445,6 +473,7 @@ class SupabaseClient:
             "chatgpt_regenerated_option_c": chatgpt.get("regenerated_option_c"),
             "chatgpt_regenerated_option_d": chatgpt.get("regenerated_option_d"),
             "chatgpt_regenerated_option_e": chatgpt.get("regenerated_option_e"),
+            "chatgpt_model_version": chatgpt.get("model_version"),
             # Gemini
             "gemini_chosen_answer": gemini.get("chosen_answer"),
             "gemini_new_general_comment": gemini.get("general_comment"),
@@ -459,6 +488,7 @@ class SupabaseClient:
             "gemini_regenerated_option_c": gemini.get("regenerated_option_c"),
             "gemini_regenerated_option_d": gemini.get("regenerated_option_d"),
             "gemini_regenerated_option_e": gemini.get("regenerated_option_e"),
+            "gemini_model_version": gemini.get("model_version"),
             # Mistral
             "mistral_chosen_answer": mistral.get("chosen_answer"),
             "mistral_general_comment": mistral.get("general_comment"),
@@ -467,6 +497,7 @@ class SupabaseClient:
             "mistral_comment_c": mistral.get("comment_c"),
             "mistral_comment_d": mistral.get("comment_d"),
             "mistral_comment_e": mistral.get("comment_e"),
+            "mistral_model_version": mistral.get("model_version"),
             # Perplexity
             "perplexity_chosen_answer": perplexity.get("chosen_answer"),
             "perplexity_general_comment": perplexity.get("general_comment"),
@@ -475,6 +506,7 @@ class SupabaseClient:
             "perplexity_comment_c": perplexity.get("comment_c"),
             "perplexity_comment_d": perplexity.get("comment_d"),
             "perplexity_comment_e": perplexity.get("comment_e"),
+            "perplexity_model_version": perplexity.get("model_version"),
             # Deepseek
             "deepseek_chosen_answer": deepseek.get("chosen_answer"),
             "deepseek_general_comment": deepseek.get("general_comment"),
@@ -483,6 +515,7 @@ class SupabaseClient:
             "deepseek_comment_c": deepseek.get("comment_c"),
             "deepseek_comment_d": deepseek.get("comment_d"),
             "deepseek_comment_e": deepseek.get("comment_e"),
+            "deepseek_model_version": deepseek.get("model_version"),
         }
 
         def _upsert():
@@ -502,9 +535,17 @@ class SupabaseClient:
                 
                 # Only include fields from payload that have non-None values
                 # This preserves existing data for models that weren't processed in this call
+                # Always update model_version fields even if None (to allow clearing)
                 for key, value in payload.items():
-                    if key != "id" and key != "question_id" and value is not None:
-                        update_payload[key] = value
+                    if key != "id" and key != "question_id" and key != "processing_status":
+                        if value is not None or key.endswith("_model_version"):
+                            update_payload[key] = value
+                
+                # If the current update has errors, set processing_status to "failed"
+                # Otherwise, leave it as-is (it will be set to "completed" by update_question_status
+                # when all models complete successfully)
+                if has_errors_in_update:
+                    update_payload["processing_status"] = "failed"
                 
                 # Only update if there are fields to update
                 if update_payload:
@@ -512,7 +553,15 @@ class SupabaseClient:
                     self._client.table("ai_answer_comments").update(update_payload).eq("id", existing_id).execute()
             else:
                 # Insert new row - include all payload fields
-                self._client.table("ai_answer_comments").insert(payload).execute()
+                # For new rows, set processing_status based on current update
+                # If there are errors, set to "failed", otherwise leave as default ("completed")
+                # It will be updated to "completed" by update_question_status when all models complete
+                new_payload = {**payload}
+                if has_errors_in_update:
+                    new_payload["processing_status"] = "failed"
+                # Otherwise, use the default from the database (which is "completed")
+                # This will be corrected by update_question_status when all models complete
+                self._client.table("ai_answer_comments").insert(new_payload).execute()
 
         await self._run_sync(_upsert)
 

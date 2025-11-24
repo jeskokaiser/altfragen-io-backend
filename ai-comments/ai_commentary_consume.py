@@ -8,9 +8,9 @@ from google import genai
 from mistralai import Mistral
 
 from supabase_client import SupabaseClient
-from openai_batch import load_batch_results
-from gemini_batch import parse_inline_responses
-from mistral_batch import parse_results_file
+from openai_batch import load_batch_results, MODEL_VERSION as OPENAI_MODEL_VERSION
+from gemini_batch import parse_inline_responses, MODEL_VERSION as GEMINI_MODEL_VERSION
+from mistral_batch import parse_results_file, MODEL_VERSION as MISTRAL_MODEL_VERSION
 from pushover_notifier import get_notifier
 from quota_detector import is_quota_error, extract_quota_message
 
@@ -129,26 +129,40 @@ async def process_openai_batches(supabase: SupabaseClient) -> None:
             continue
         success_count = 0
         error_count = 0
+        all_succeeded = True
+        
         for qid, payload in results.items():
             if "error" in payload:
                 logger.error("OpenAI error for question %s: %s", qid, payload["error"])
                 await supabase.update_question_status(qid, "failed", set_processed_at=False)
                 error_count += 1
+                all_succeeded = False
                 continue
-            await supabase.upsert_comments(qid, {"chatgpt": payload})
             
-            # Check if all enabled models have completed before marking as completed
-            if await supabase.check_all_models_completed(qid, models_enabled):
-                await supabase.update_question_status(qid, "completed", set_processed_at=True)
-                logger.info("Question %s: all enabled models completed", qid)
-            else:
-                logger.debug("Question %s: waiting for other models to complete", qid)
-            success_count += 1
+            # Add model version to payload
+            chatgpt_payload = {**payload, "model_version": OPENAI_MODEL_VERSION}
+            try:
+                await supabase.upsert_comments(qid, {"chatgpt": chatgpt_payload})
+                
+                # Check if all enabled models have completed before marking as completed
+                if await supabase.check_all_models_completed(qid, models_enabled):
+                    await supabase.update_question_status(qid, "completed", set_processed_at=True)
+                    logger.info("Question %s: all enabled models completed", qid)
+                else:
+                    logger.debug("Question %s: waiting for other models to complete", qid)
+                success_count += 1
+            except Exception as e:
+                logger.error("Failed to upsert comments for question %s: %s", qid, e, exc_info=True)
+                error_count += 1
+                all_succeeded = False
+                await supabase.update_question_status(qid, "failed", set_processed_at=False)
 
+        # Only mark batch job as completed if ALL questions succeeded
+        batch_status = "completed" if all_succeeded and error_count == 0 else "failed"
         await supabase.update_batch_job(
             batch_id=batch_id,
             provider="openai",
-            status="completed",
+            status=batch_status,
             output_file_id=output_file_id,
         )
         logger.info(
@@ -222,26 +236,40 @@ async def process_gemini_batches(supabase: SupabaseClient) -> None:
         results = parse_inline_responses(batch_job, question_ids)
         success_count = 0
         error_count = 0
+        all_succeeded = True
+        
         for qid, payload in results.items():
             if "error" in payload:
                 logger.error("Gemini error for question %s: %s", qid, payload["error"])
                 await supabase.update_question_status(qid, "failed", set_processed_at=False)
                 error_count += 1
+                all_succeeded = False
                 continue
-            await supabase.upsert_comments(qid, {"gemini": payload})
             
-            # Check if all enabled models have completed before marking as completed
-            if await supabase.check_all_models_completed(qid, models_enabled):
-                await supabase.update_question_status(qid, "completed", set_processed_at=True)
-                logger.info("Question %s: all enabled models completed", qid)
-            else:
-                logger.debug("Question %s: waiting for other models to complete", qid)
-            success_count += 1
+            # Add model version to payload
+            gemini_payload = {**payload, "model_version": GEMINI_MODEL_VERSION}
+            try:
+                await supabase.upsert_comments(qid, {"gemini": gemini_payload})
+                
+                # Check if all enabled models have completed before marking as completed
+                if await supabase.check_all_models_completed(qid, models_enabled):
+                    await supabase.update_question_status(qid, "completed", set_processed_at=True)
+                    logger.info("Question %s: all enabled models completed", qid)
+                else:
+                    logger.debug("Question %s: waiting for other models to complete", qid)
+                success_count += 1
+            except Exception as e:
+                logger.error("Failed to upsert comments for question %s: %s", qid, e, exc_info=True)
+                error_count += 1
+                all_succeeded = False
+                await supabase.update_question_status(qid, "failed", set_processed_at=False)
 
+        # Only mark batch job as completed if ALL questions succeeded
+        batch_status = "completed" if all_succeeded and error_count == 0 else "failed"
         await supabase.update_batch_job(
             batch_id=job_name,
             provider="gemini",
-            status="completed",
+            status=batch_status,
         )
         logger.info(
             "Processed Gemini batch %s with %d successful question(s).",
@@ -291,7 +319,7 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
         if status in {"QUEUED", "RUNNING"}:
             continue
 
-        if status != "SUCCESS":
+        if status != "completed":
             logger.warning("Mistral batch %s finished with status %s", job_id, status)
             
             # Check if status indicates quota error
@@ -342,16 +370,20 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
         results = parse_results_file(result_path)
         success_count = 0
         error_count = 0
+        all_succeeded = True
         
         for qid, payload in results.items():
             if "error" in payload:
                 logger.error("Mistral error for question %s: %s", qid, payload["error"])
                 await supabase.update_question_status(qid, "failed", set_processed_at=False)
                 error_count += 1
+                all_succeeded = False
                 continue
             
+            # Add model version to payload
+            mistral_payload = {**payload, "model_version": MISTRAL_MODEL_VERSION}
             try:
-                await supabase.upsert_comments(qid, {"mistral": payload})
+                await supabase.upsert_comments(qid, {"mistral": mistral_payload})
                 
                 # Check if all enabled models have completed before marking as completed
                 if await supabase.check_all_models_completed(qid, models_enabled):
@@ -363,6 +395,8 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
             except Exception as e:
                 logger.error(f"Failed to upsert comments for question {qid}: {e}", exc_info=True)
                 error_count += 1
+                all_succeeded = False
+                await supabase.update_question_status(qid, "failed", set_processed_at=False)
         
         if error_count > 0:
             logger.warning(f"Mistral batch {job_id}: {error_count} errors, {success_count} successes")
@@ -376,10 +410,12 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
                     message=f"High error rate in batch {job_id}: {error_count}/{total_processed} questions failed ({error_count/total_processed*100:.1f}%)"
                 )
 
+        # Only mark batch job as completed if ALL questions succeeded
+        batch_status = "completed" if all_succeeded and error_count == 0 else "failed"
         await supabase.update_batch_job(
             batch_id=job_id,
             provider="mistral",
-            status="SUCCESS",
+            status=batch_status,
             output_file_id=output_file_id,
         )
         logger.info(
