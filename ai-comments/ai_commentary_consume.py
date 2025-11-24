@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from typing import Any, Dict, List
 
@@ -216,7 +217,16 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
         # Log first few lines for debugging
         with result_path.open("r", encoding="utf-8") as f:
             first_lines = [f.readline() for _ in range(3)]
-            logger.debug(f"First 3 lines of output file:\n{''.join(first_lines)}")
+            logger.info(f"First 3 lines of output file (raw):\n{''.join(first_lines)}")
+            # Try to parse and show structure
+            for i, line in enumerate(first_lines, 1):
+                if line.strip():
+                    try:
+                        parsed = json.loads(line)
+                        logger.info(f"Line {i} parsed structure (keys): {list(parsed.keys())}")
+                        logger.debug(f"Line {i} full structure: {json.dumps(parsed, indent=2, default=str)[:2000]}")
+                    except Exception as e:
+                        logger.warning(f"Line {i} could not be parsed: {e}")
 
         results = parse_results_file(result_path)
         logger.info(f"Parsed {len(results)} results from batch output")

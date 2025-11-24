@@ -226,6 +226,11 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
                 logger.error(f"Failed to parse line {line_num} as JSON: {e}")
                 logger.debug(f"Line content: {line[:200]}...")
                 continue
+            
+            # Log first line structure for debugging
+            if line_num == 1:
+                logger.info(f"First line structure (keys): {list(obj.keys())}")
+                logger.debug(f"First line full structure: {json.dumps(obj, indent=2, default=str)[:1000]}...")
                 
             custom_id = obj.get("custom_id", "")
             if not custom_id.startswith("q-"):
@@ -244,18 +249,28 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
             response = obj.get("response")
             if not response:
                 logger.warning(f"Question {qid}: no 'response' field in result. Keys: {list(obj.keys())}")
+                logger.debug(f"Full object structure: {json.dumps(obj, indent=2, default=str)[:2000]}")
                 results[qid] = {"error": "no response field"}
                 continue
                 
-            # Response might be a dict or have a body field
+            # Log response structure for debugging
+            logger.debug(f"Question {qid}: response type={type(response)}")
             if isinstance(response, dict):
+                logger.debug(f"Question {qid}: response keys: {list(response.keys())}")
                 body = response.get("body") or response
             else:
+                logger.debug(f"Question {qid}: response is not a dict: {type(response)}")
                 body = response
+                
+            if isinstance(body, dict):
+                logger.debug(f"Question {qid}: body keys: {list(body.keys())}")
+            else:
+                logger.debug(f"Question {qid}: body is not a dict: {type(body)}")
                 
             choices = body.get("choices") or []
             if not choices:
                 logger.warning(f"Question {qid}: no choices in response. Body keys: {list(body.keys()) if isinstance(body, dict) else 'not a dict'}")
+                logger.debug(f"Question {qid}: Full response structure: {json.dumps(response, indent=2, default=str)[:2000]}")
                 results[qid] = {"error": "no choices"}
                 continue
                 
@@ -264,23 +279,42 @@ def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
             
             if not content:
                 logger.warning(f"Question {qid}: no content in message. Message keys: {list(message.keys())}")
+                logger.debug(f"Full message object: {json.dumps(message, indent=2)}")
                 results[qid] = {"error": "no content"}
                 continue
-                
+            
+            # Log content details for debugging
+            logger.debug(f"Question {qid}: content type={type(content)}, length={len(str(content)) if content else 0}")
+            if content:
+                logger.debug(f"Question {qid}: content preview (first 500 chars): {str(content)[:500]}")
+            
             # Parse JSON content
             try:
                 if isinstance(content, dict):
                     commentary = content
+                elif isinstance(content, str):
+                    content_stripped = content.strip()
+                    if not content_stripped:
+                        logger.error(f"Question {qid}: content is empty string")
+                        results[qid] = {"error": "empty content"}
+                        continue
+                    commentary = json.loads(content_stripped)
                 else:
-                    commentary = json.loads(content)
+                    logger.error(f"Question {qid}: unexpected content type: {type(content)}")
+                    results[qid] = {"error": f"unexpected content type: {type(content)}"}
+                    continue
+                    
                 results[qid] = commentary
                 logger.debug(f"Successfully parsed commentary for question {qid}")
             except json.JSONDecodeError as exc:
                 logger.error(f"Question {qid}: failed to parse content as JSON: {exc}")
-                logger.debug(f"Content preview: {str(content)[:200]}...")
+                logger.error(f"Content (full): {repr(content)}")
+                logger.error(f"Content (first 1000 chars): {str(content)[:1000]}")
+                # Log the full response structure for debugging
+                logger.debug(f"Full response structure: {json.dumps(obj, indent=2, default=str)}")
                 results[qid] = {"error": f"parse error: {exc}"}
             except Exception as exc:
-                logger.error(f"Question {qid}: unexpected error parsing content: {exc}")
+                logger.error(f"Question {qid}: unexpected error parsing content: {exc}", exc_info=True)
                 results[qid] = {"error": f"parse error: {exc}"}
     
     logger.info(f"Parsed {len(results)} results from {line_count} lines in batch output file")
