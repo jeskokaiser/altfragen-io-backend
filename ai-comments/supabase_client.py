@@ -495,7 +495,7 @@ class SupabaseClient:
                 "question_ids": question_ids,
                 "input_file_id": input_file_id,
             }
-            self._client.table("ai_commentary_batch_jobs").insert(payload).select("*").execute()
+            self._client.table("ai_commentary_batch_jobs").insert(payload).execute()
 
         await self._run_sync(_create)
 
