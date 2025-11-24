@@ -147,7 +147,12 @@ async def process_gemini_batches(supabase: SupabaseClient) -> None:
 
 
 async def process_mistral_batches(supabase: SupabaseClient) -> None:
-    client = Mistral()
+    import os
+    mistral_api_key = os.getenv("MISTRAL_API_KEY")
+    if not mistral_api_key:
+        logger.error("MISTRAL_API_KEY environment variable is not set, skipping Mistral batches")
+        return
+    client = Mistral(api_key=mistral_api_key)
     jobs = await supabase.get_open_batch_jobs(provider="mistral")
     if not jobs:
         logger.info("No open Mistral batch jobs.")

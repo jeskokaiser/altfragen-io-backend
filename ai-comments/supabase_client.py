@@ -465,9 +465,22 @@ class SupabaseClient:
         }
 
         def _upsert():
-            self._client.table("ai_answer_comments").upsert(
-                payload, on_conflict="question_id"
-            ).execute()
+            # Check if a row exists for this question_id
+            existing = (
+                self._client.table("ai_answer_comments")
+                .select("id")
+                .eq("question_id", question_id)
+                .limit(1)
+                .execute()
+            )
+            
+            if existing.data and len(existing.data) > 0:
+                # Update existing row
+                existing_id = existing.data[0]["id"]
+                self._client.table("ai_answer_comments").update(payload).eq("id", existing_id).execute()
+            else:
+                # Insert new row
+                self._client.table("ai_answer_comments").insert(payload).execute()
 
         await self._run_sync(_upsert)
 

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -69,13 +70,16 @@ def submit_batch(
     Returns (job_id, question_ids).
     """
     if client is None:
-        client = Mistral()
+        api_key = os.getenv("MISTRAL_API_KEY")
+        if not api_key:
+            raise RuntimeError("MISTRAL_API_KEY environment variable is not set")
+        client = Mistral(api_key=api_key)
 
     jsonl_path, question_ids = build_batch_file(questions)
 
     with open(jsonl_path, "rb") as f:
         file_obj = File(file_name="ai_commentary.jsonl", content=f.read())
-    batch_data = client.files.upload(file=file_obj, purpose="batch")
+    batch_data = client.files.upload(file=file_obj)
 
     created_job = client.batch.jobs.create(
         input_files=[batch_data.id],
