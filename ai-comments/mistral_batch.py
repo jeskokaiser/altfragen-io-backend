@@ -25,9 +25,12 @@ def build_prompt(question: Dict[str, Any]) -> str:
 
 def build_batch_file(
     questions: Iterable[Dict[str, Any]],
-) -> Tuple[Path, List[int]]:
+    model: str = "mistral-medium-latest",
+) -> Tuple[Path, List[str]]:
     """
     Build an in-memory JSONL batch file as described in the Mistral docs.
+    Mistral batch API expects each line to be: {"custom_id": "...", "body": {...}}
+    The body contains the actual request body (messages, max_tokens, etc.)
     """
     buffer = BytesIO()
     question_ids: List[str] = []
@@ -35,10 +38,11 @@ def build_batch_file(
     for idx, q in enumerate(questions):
         qid = str(q["id"])  # Handle UUIDs as strings
         question_ids.append(qid)
+        # Mistral batch API format: only custom_id and body
+        # The body contains the actual chat completions request
         request = {
             "custom_id": f"q-{qid}",
             "body": {
-                "model": "mistral-medium-latest",
                 "max_tokens": 4096,
                 "messages": [
                     {
@@ -76,7 +80,7 @@ def submit_batch(
             raise RuntimeError("MISTRAL_API_KEY environment variable is not set")
         client = Mistral(api_key=api_key)
 
-    jsonl_path, question_ids = build_batch_file(questions)
+    jsonl_path, question_ids = build_batch_file(questions, model=model)
 
     with open(jsonl_path, "rb") as f:
         file_obj = File(file_name="ai_commentary.jsonl", content=f.read())
