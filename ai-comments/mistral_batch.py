@@ -61,48 +61,52 @@ Erinnere dich: Deine Antwort besteht ausschließlich aus dem beschriebenen JSON-
 """
 
 
+# Mistral's JSON schema format requires name and schema fields
 JSON_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "chosen_answer": {
-            "type": "string",
-            "description": "Ein Buchstabe von A bis E für die gewählte beste Antwort",
+    "name": "answer_comments",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "chosen_answer": {
+                "type": "string",
+                "description": "Ein Buchstabe von A bis E für die gewählte beste Antwort",
+            },
+            "general_comment": {
+                "type": "string",
+                "description": "Allgemeiner Kommentar zur Frage",
+            },
+            "comment_a": {
+                "type": "string",
+                "description": "Kurzer Kommentar zu Antwort A",
+            },
+            "comment_b": {
+                "type": "string",
+                "description": "Kurzer Kommentar zu Antwort B",
+            },
+            "comment_c": {
+                "type": "string",
+                "description": "Kurzer Kommentar zu Antwort C",
+            },
+            "comment_d": {
+                "type": "string",
+                "description": "Kurzer Kommentar zu Antwort D",
+            },
+            "comment_e": {
+                "type": "string",
+                "description": "Kurzer Kommentar zu Antwort E",
+            },
         },
-        "general_comment": {
-            "type": "string",
-            "description": "Allgemeiner Kommentar zur Frage",
-        },
-        "comment_a": {
-            "type": "string",
-            "description": "Kurzer Kommentar zu Antwort A",
-        },
-        "comment_b": {
-            "type": "string",
-            "description": "Kurzer Kommentar zu Antwort B",
-        },
-        "comment_c": {
-            "type": "string",
-            "description": "Kurzer Kommentar zu Antwort C",
-        },
-        "comment_d": {
-            "type": "string",
-            "description": "Kurzer Kommentar zu Antwort D",
-        },
-        "comment_e": {
-            "type": "string",
-            "description": "Kurzer Kommentar zu Antwort E",
-        },
+        "required": [
+            "chosen_answer",
+            "general_comment",
+            "comment_a",
+            "comment_b",
+            "comment_c",
+            "comment_d",
+            "comment_e",
+        ],
+        "additionalProperties": False,
     },
-    "required": [
-        "chosen_answer",
-        "general_comment",
-        "comment_a",
-        "comment_b",
-        "comment_c",
-        "comment_d",
-        "comment_e",
-    ],
-    "additionalProperties": False,
 }
 
 
