@@ -28,29 +28,37 @@ def build_batch_file(
     model: str = "mistral-medium-latest",
 ) -> Tuple[Path, List[str]]:
     """
-    Build an in-memory JSONL batch file as described in the Mistral docs.
-    Mistral batch API expects each line to be: {"custom_id": "...", "body": {...}}
-    The body contains the actual request parameters (messages, max_tokens, etc.)
+    Build an in-memory JSONL batch file for Mistral batch API.
+    
+    According to Mistral docs, format should be:
+    {"custom_id": "...", "body": {"messages": [...], "max_tokens": ...}}
+    
+    However, the file upload endpoint validates against fine-tuning format.
+    We'll keep the correct format and track the custom IDs separately.
     """
     buffer = BytesIO()
     question_ids: List[str] = []
+    
+    # Store mapping for later retrieval
+    custom_id_mapping = {}
 
     for idx, q in enumerate(questions):
         qid = str(q["id"])  # Handle UUIDs as strings
         question_ids.append(qid)
-        # Mistral batch API format: just custom_id and body
-        # The body contains the actual chat completions request parameters
-        # Note: model is NOT included in the body, it's passed to batch.jobs.create
+        custom_id = f"q-{qid}"
+        custom_id_mapping[idx] = custom_id
+        
+        # Mistral batch format as per documentation
         request = {
-            "custom_id": f"q-{qid}",
+            "custom_id": custom_id,
             "body": {
-                "max_tokens": 4096,
                 "messages": [
                     {
                         "role": "user",
                         "content": build_prompt(q),
                     }
                 ],
+                "max_tokens": 4096,
             },
         }
         buffer.write(json.dumps(request).encode("utf-8"))
@@ -75,17 +83,102 @@ def submit_batch(
 
     Returns (job_id, question_ids).
     """
+    api_key = os.getenv("MISTRAL_API_KEY")
+    if not api_key:
+        raise RuntimeError("MISTRAL_API_KEY environment variable is not set")
+    
     if client is None:
-        api_key = os.getenv("MISTRAL_API_KEY")
-        if not api_key:
-            raise RuntimeError("MISTRAL_API_KEY environment variable is not set")
         client = Mistral(api_key=api_key)
 
     jsonl_path, question_ids = build_batch_file(questions, model=model)
 
+    # Read the file content
     with open(jsonl_path, "rb") as f:
-        file_obj = File(file_name="ai_commentary.jsonl", content=f.read())
-    batch_data = client.files.upload(file=file_obj)
+        file_content = f.read()
+    
+    # The Mistral SDK files.upload() validates against fine-tuning schema,
+    # but we need batch schema. Try different approaches:
+    
+    import httpx
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # Prepare file for upload
+    files = {
+        'file': ('batch_input.jsonl', file_content, 'application/x-jsonlines')
+    }
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+    }
+    
+    file_uploaded = False
+    batch_data = None
+    last_error = None
+    
+    # Approach 1: Try raw API with explicit batch purpose
+    with httpx.Client() as http_client:
+        try:
+            logger.info("Attempting to upload batch file with purpose=batch")
+            response = http_client.post(
+                'https://api.mistral.ai/v1/files',
+                headers=headers,
+                files=files,
+                data={'purpose': 'batch'}
+            )
+            logger.info(f"Upload response status: {response.status_code}")
+            if response.status_code in [200, 201]:
+                batch_data_dict = response.json()
+                class FileResponse:
+                    def __init__(self, id):
+                        self.id = id
+                batch_data = FileResponse(batch_data_dict.get('id'))
+                file_uploaded = True
+                logger.info(f"Successfully uploaded batch file with ID: {batch_data.id}")
+            else:
+                logger.warning(f"Upload failed with status {response.status_code}: {response.text}")
+                last_error = f"HTTP {response.status_code}: {response.text}"
+        except Exception as e:
+            logger.warning(f"Raw API with purpose=batch failed: {e}")
+            last_error = str(e)
+    
+    # Approach 2: Try without purpose parameter  
+    if not file_uploaded:
+        with httpx.Client() as http_client:
+            try:
+                logger.info("Attempting to upload batch file without purpose parameter")
+                response = http_client.post(
+                    'https://api.mistral.ai/v1/files',
+                    headers=headers,
+                    files=files
+                )
+                logger.info(f"Upload response status: {response.status_code}")
+                if response.status_code in [200, 201]:
+                    batch_data_dict = response.json()
+                    class FileResponse:
+                        def __init__(self, id):
+                            self.id = id
+                    batch_data = FileResponse(batch_data_dict.get('id'))
+                    file_uploaded = True
+                    logger.info(f"Successfully uploaded batch file with ID: {batch_data.id}")
+                else:
+                    logger.warning(f"Upload failed with status {response.status_code}: {response.text}")
+                    last_error = f"HTTP {response.status_code}: {response.text}"
+            except Exception as e:
+                logger.warning(f"Raw API without purpose failed: {e}")
+                last_error = str(e)
+    
+    # Approach 3: Last resort - use SDK (will likely fail with validation error)
+    if not file_uploaded:
+        logger.info("Falling back to SDK file upload method")
+        try:
+            file_obj = File(file_name="batch_input.jsonl", content=file_content)
+            batch_data = client.files.upload(file=file_obj)
+            logger.info(f"Successfully uploaded batch file with SDK, ID: {batch_data.id}")
+        except Exception as e:
+            logger.error(f"SDK upload failed: {e}")
+            # Re-raise with more context
+            raise RuntimeError(f"Failed to upload batch file to Mistral. Last error: {last_error or e}") from e
 
     created_job = client.batch.jobs.create(
         input_files=[batch_data.id],
