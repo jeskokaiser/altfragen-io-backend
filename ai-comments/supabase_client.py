@@ -465,21 +465,32 @@ class SupabaseClient:
         }
 
         def _upsert():
-            # Check if a row exists for this question_id
+            # Check if a row exists for this question_id and get existing data
             existing = (
                 self._client.table("ai_answer_comments")
-                .select("id")
+                .select("*")
                 .eq("question_id", question_id)
                 .limit(1)
                 .execute()
             )
             
             if existing.data and len(existing.data) > 0:
-                # Update existing row
-                existing_id = existing.data[0]["id"]
-                self._client.table("ai_answer_comments").update(payload).eq("id", existing_id).execute()
+                # Merge with existing data - only update fields that have non-None values in payload
+                existing_row = existing.data[0]
+                update_payload = {}
+                
+                # Only include fields from payload that have non-None values
+                # This preserves existing data for models that weren't processed in this call
+                for key, value in payload.items():
+                    if key != "id" and key != "question_id" and value is not None:
+                        update_payload[key] = value
+                
+                # Only update if there are fields to update
+                if update_payload:
+                    existing_id = existing.data[0]["id"]
+                    self._client.table("ai_answer_comments").update(update_payload).eq("id", existing_id).execute()
             else:
-                # Insert new row
+                # Insert new row - include all payload fields
                 self._client.table("ai_answer_comments").insert(payload).execute()
 
         await self._run_sync(_upsert)

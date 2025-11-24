@@ -148,8 +148,7 @@ JSON_SCHEMA: Dict[str, Any] = {
 
 def build_prompt(question: Dict[str, Any]) -> str:
     return (
-        "Analysiere diese Multiple-Choice-Frage und erstelle Kommentare für jede "
-        "Antwortmöglichkeit:\n\n"
+        "Analysiere diese Multiple-Choice-Frage\n\n"
         f"Frage: {question.get('question')}\n"
         f"A) {question.get('option_a')}\n"
         f"B) {question.get('option_b')}\n"
@@ -157,8 +156,8 @@ def build_prompt(question: Dict[str, Any]) -> str:
         f"D) {question.get('option_d')}\n"
         f"E) {question.get('option_e')}\n\n"
         "Erstelle:\n"
-        "1. Einen kurzen, aber gehaltvollen Überblick (3–5 Sätze)...\n"
-        "2. Kommentar für jede Antwortoption (A–E)...\n"
+        "1. Einen kurzen, aber gehaltvollen Überblick zur Frage\n"
+        "2. Kommentar für jede Antwortoption (A–E)\n"
     )
 
 

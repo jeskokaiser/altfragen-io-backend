@@ -38,6 +38,7 @@ def build_batch_file(
         request = {
             "custom_id": f"q-{qid}",
             "body": {
+                "model": "mistral-medium-latest",
                 "max_tokens": 4096,
                 "messages": [
                     {
