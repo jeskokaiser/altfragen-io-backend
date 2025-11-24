@@ -170,6 +170,11 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
         logger.info("Checking Mistral batch %s", job_id)
         batch_job = client.batch.jobs.get(job_id=job_id)
         status = batch_job.status
+        logger.info(f"Mistral batch {job_id} status: {status}")
+        logger.info(f"Batch job details: total_requests={getattr(batch_job, 'total_requests', 'N/A')}, "
+                   f"succeeded_requests={getattr(batch_job, 'succeeded_requests', 'N/A')}, "
+                   f"failed_requests={getattr(batch_job, 'failed_requests', 'N/A')}")
+        
         if status in {"QUEUED", "RUNNING"}:
             logger.info("Mistral batch %s still in status %s", job_id, status)
             continue
@@ -194,29 +199,55 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
             continue
 
         # Download results into a temporary file
+        logger.info(f"Downloading Mistral batch output file {output_file_id}")
         output_stream = client.files.download(file_id=output_file_id)
         tmp_dir = Path(tempfile.mkdtemp())
         result_path = tmp_dir / f"mistral_{job_id}.jsonl"
+        
+        bytes_written = 0
         with result_path.open("wb") as f:
             for chunk in output_stream.stream:
                 f.write(chunk)
+                bytes_written += len(chunk)
+        
+        logger.info(f"Downloaded {bytes_written} bytes to {result_path}")
+        logger.info(f"File size: {result_path.stat().st_size} bytes")
+        
+        # Log first few lines for debugging
+        with result_path.open("r", encoding="utf-8") as f:
+            first_lines = [f.readline() for _ in range(3)]
+            logger.debug(f"First 3 lines of output file:\n{''.join(first_lines)}")
 
         results = parse_results_file(result_path)
+        logger.info(f"Parsed {len(results)} results from batch output")
         success_count = 0
+        error_count = 0
+        
         for qid, payload in results.items():
             if "error" in payload:
                 logger.error("Mistral error for question %s: %s", qid, payload["error"])
                 await supabase.update_question_status(qid, "failed", set_processed_at=False)
+                error_count += 1
                 continue
-            await supabase.upsert_comments(qid, {"mistral": payload})
             
-            # Check if all enabled models have completed before marking as completed
-            if await supabase.check_all_models_completed(qid, models_enabled):
-                await supabase.update_question_status(qid, "completed", set_processed_at=True)
-                logger.info("Question %s: all enabled models completed", qid)
-            else:
-                logger.debug("Question %s: waiting for other models to complete", qid)
-            success_count += 1
+            try:
+                logger.debug(f"Upserting Mistral comments for question {qid}")
+                await supabase.upsert_comments(qid, {"mistral": payload})
+                logger.debug(f"Successfully upserted comments for question {qid}")
+                
+                # Check if all enabled models have completed before marking as completed
+                if await supabase.check_all_models_completed(qid, models_enabled):
+                    await supabase.update_question_status(qid, "completed", set_processed_at=True)
+                    logger.info("Question %s: all enabled models completed", qid)
+                else:
+                    logger.debug("Question %s: waiting for other models to complete", qid)
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Failed to upsert comments for question {qid}: {e}", exc_info=True)
+                error_count += 1
+        
+        if error_count > 0:
+            logger.warning(f"Mistral batch {job_id}: {error_count} errors, {success_count} successes")
 
         await supabase.update_batch_job(
             batch_id=job_id,

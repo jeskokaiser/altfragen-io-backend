@@ -193,36 +193,97 @@ def submit_batch(
 def parse_results_file(path: Path) -> Dict[str, Dict[str, Any]]:
     """
     Parse the downloaded batch results file into question_id -> commentary dict.
+    
+    Mistral batch output format should be similar to OpenAI:
+    {
+      "custom_id": "q-<uuid>",
+      "response": {
+        "body": {
+          "choices": [{
+            "message": {
+              "content": "<json string>"
+            }
+          }]
+        }
+      }
+    }
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     results: Dict[str, Dict[str, Any]] = {}
+    line_count = 0
+    
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             if not line.strip():
                 continue
-            obj = json.loads(line)
+            line_count += 1
+            
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse line {line_num} as JSON: {e}")
+                logger.debug(f"Line content: {line[:200]}...")
+                continue
+                
             custom_id = obj.get("custom_id", "")
             if not custom_id.startswith("q-"):
+                logger.warning(f"Line {line_num}: custom_id '{custom_id}' doesn't start with 'q-', skipping")
                 continue
             qid = custom_id.split("-", 1)[1]  # Extract UUID string, not int
 
+            # Check for errors
             error = obj.get("error")
             if error:
+                logger.error(f"Question {qid} has error: {error}")
                 results[qid] = {"error": error}
                 continue
 
-            response = obj.get("response") or {}
-            body = response.get("body") or {}
+            # Parse response structure
+            response = obj.get("response")
+            if not response:
+                logger.warning(f"Question {qid}: no 'response' field in result. Keys: {list(obj.keys())}")
+                results[qid] = {"error": "no response field"}
+                continue
+                
+            # Response might be a dict or have a body field
+            if isinstance(response, dict):
+                body = response.get("body") or response
+            else:
+                body = response
+                
             choices = body.get("choices") or []
             if not choices:
+                logger.warning(f"Question {qid}: no choices in response. Body keys: {list(body.keys()) if isinstance(body, dict) else 'not a dict'}")
                 results[qid] = {"error": "no choices"}
                 continue
+                
             message = choices[0].get("message") or {}
             content = message.get("content")
+            
+            if not content:
+                logger.warning(f"Question {qid}: no content in message. Message keys: {list(message.keys())}")
+                results[qid] = {"error": "no content"}
+                continue
+                
+            # Parse JSON content
             try:
-                commentary = json.loads(content)
+                if isinstance(content, dict):
+                    commentary = content
+                else:
+                    commentary = json.loads(content)
+                results[qid] = commentary
+                logger.debug(f"Successfully parsed commentary for question {qid}")
+            except json.JSONDecodeError as exc:
+                logger.error(f"Question {qid}: failed to parse content as JSON: {exc}")
+                logger.debug(f"Content preview: {str(content)[:200]}...")
+                results[qid] = {"error": f"parse error: {exc}"}
             except Exception as exc:
-                commentary = {"error": f"parse error: {exc}"}
-            results[qid] = commentary
+                logger.error(f"Question {qid}: unexpected error parsing content: {exc}")
+                results[qid] = {"error": f"parse error: {exc}"}
+    
+    logger.info(f"Parsed {len(results)} results from {line_count} lines in batch output file")
     return results
 
 
