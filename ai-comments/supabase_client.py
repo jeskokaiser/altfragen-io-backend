@@ -376,7 +376,7 @@ class SupabaseClient:
                     timezone.utc
                 ).isoformat()
 
-            self._client.table("questions").update(payload).eq("id", question_id).select("id").execute()
+            self._client.table("questions").update(payload).eq("id", question_id).execute()
 
         await self._run_sync(_update)
 
@@ -467,7 +467,7 @@ class SupabaseClient:
         def _upsert():
             self._client.table("ai_answer_comments").upsert(
                 payload, on_conflict="question_id"
-            ).select("question_id").execute()
+            ).execute()
 
         await self._run_sync(_upsert)
 
@@ -516,7 +516,7 @@ class SupabaseClient:
 
             self._client.table("ai_commentary_batch_jobs").update(payload).eq(
                 "batch_id", batch_id
-            ).eq("provider", provider).select("*").execute()
+            ).eq("provider", provider).execute()
 
         await self._run_sync(_update)
 
