@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from mistralai import File, Mistral
 
-from .prompts import SYSTEM_PROMPT_WITHOUT_REGENERATING, build_user_prompt
+from prompts import SYSTEM_PROMPT_WITHOUT_REGENERATING, build_user_prompt
 
 
 # Mistral's JSON schema format requires name and schema fields

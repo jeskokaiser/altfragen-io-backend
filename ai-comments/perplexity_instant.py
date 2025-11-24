@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 import httpx
 
-from .prompts import SYSTEM_PROMPT_WITHOUT_REGENERATING, build_user_prompt
+from prompts import SYSTEM_PROMPT_WITHOUT_REGENERATING, build_user_prompt
 
 
 logger = logging.getLogger("perplexity_instant")

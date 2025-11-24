@@ -3,7 +3,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from google import genai
 
-from .prompts import SYSTEM_PROMPT_WITH_REGENERATING, build_user_prompt
+from prompts import SYSTEM_PROMPT_WITH_REGENERATING, build_user_prompt
 
 
 JSON_SCHEMA: Dict[str, Any] = {
