@@ -108,8 +108,6 @@ def build_inline_requests(
                 "config": {
                     "response_mime_type": "application/json",
                     "response_schema": JSON_SCHEMA,
-                    # Encode the question id into metadata so we can map back.
-                    "metadata": {"question_id": str(qid)},
                 },
             }
         )

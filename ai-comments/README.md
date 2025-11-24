@@ -75,7 +75,7 @@ create table if not exists ai_commentary_batch_jobs (
   provider text not null, -- 'openai' | 'gemini' | 'mistral'
   batch_id text not null,
   status text not null default 'pending',
-  question_ids bigint[] not null,
+  question_ids uuid[] not null,
   input_file_id text,
   output_file_id text,
   error_file_id text,
