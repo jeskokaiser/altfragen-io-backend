@@ -44,6 +44,9 @@ async def generate_commentary(
                 "temperature": 0.7,
                 "max_tokens": 4096,
                 "stream": False,
+                "response_format": {
+                    "type": "json_object",
+                },
             },
         )
 
@@ -63,24 +66,20 @@ async def generate_commentary(
 
         try:
             content = data["choices"][0]["message"]["content"]
+            # With JSON Output, the response should already be valid JSON
+            # But we still need to handle potential markdown code blocks for backwards compatibility
             if "```json" in content:
                 content = content.replace("```json", "").replace("```", "").strip()
 
             parsed_content = json.loads(content)
-            required_fields = [
-                "chosen_answer",
-                "general_comment",
-                "comment_a",
-                "comment_b",
-                "comment_c",
-                "comment_d",
-                "comment_e",
-            ]
-            for field in required_fields:
+            
+            # Ensure all required fields are present with fallback values
+            if not parsed_content.get("chosen_answer"):
+                parsed_content["chosen_answer"] = None
+            
+            for field in ["general_comment", "comment_a", "comment_b", "comment_c", "comment_d", "comment_e"]:
                 if not parsed_content.get(field):
-                    parsed_content[field] = (
-                        None if field == "chosen_answer" else "Keine Bewertung verfügbar."
-                    )
+                    parsed_content[field] = "Keine Bewertung verfügbar."
 
             return parsed_content
         except json.JSONDecodeError as parse_error:
