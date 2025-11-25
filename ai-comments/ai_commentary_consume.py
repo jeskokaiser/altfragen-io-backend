@@ -319,7 +319,7 @@ async def process_mistral_batches(supabase: SupabaseClient) -> None:
         if status in {"QUEUED", "RUNNING"}:
             continue
 
-        if status != "completed":
+        if status != "SUCCESS":
             logger.warning("Mistral batch %s finished with status %s", job_id, status)
             
             # Check if status indicates quota error

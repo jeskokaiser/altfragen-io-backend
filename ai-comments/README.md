@@ -34,6 +34,8 @@ The worker expects the following variables on your VPS:
 - `OPENAI_API_KEY` – for OpenAI Batch API
 - `GEMINI_API_KEY` – for Gemini Batch API
 - `MISTRAL_API_KEY` – for Mistral Batch API
+- `DEEPSEEK_API_KEY` – for Deepseek API
+- `PERPLEXITY_API_KEY` – for Perplexity API
 - `PUSHOVER_USER_KEY` – (optional) Pushover user key for error notifications
 - `PUSHOVER_API_TOKEN` – (optional) Pushover API token for error notifications
 

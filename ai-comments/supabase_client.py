@@ -535,10 +535,14 @@ class SupabaseClient:
                 
                 # Only include fields from payload that have non-None values
                 # This preserves existing data for models that weren't processed in this call
-                # Always update model_version fields even if None (to allow clearing)
+                # For model_version fields: only update if new value is not None (preserve existing)
                 for key, value in payload.items():
                     if key != "id" and key != "question_id" and key != "processing_status":
-                        if value is not None or key.endswith("_model_version"):
+                        if key.endswith("_model_version"):
+                            # Only update model_version if new value is not None (preserve existing)
+                            if value is not None:
+                                update_payload[key] = value
+                        elif value is not None:
                             update_payload[key] = value
                 
                 # If the current update has errors, set processing_status to "failed"
