@@ -7,7 +7,7 @@ from prompts import SYSTEM_PROMPT_WITH_REGENERATING, build_user_prompt
 
 
 # Model version constant
-MODEL_VERSION = "2.5-pro"
+MODEL_VERSION = "gemini-3-pro-preview"
 
 
 JSON_SCHEMA: Dict[str, Any] = {
@@ -108,7 +108,7 @@ def build_inline_requests(
 def submit_batch(
     questions: Iterable[Dict[str, Any]],
     client: "genai.Client | None" = None,
-    model: str = f"models/gemini-{MODEL_VERSION}",
+    model: str = f"models/{MODEL_VERSION}",
 ) -> Tuple[str, List[str]]:
     """
     Create a Gemini Batch job using inline requests.
