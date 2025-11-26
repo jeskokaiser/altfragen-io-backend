@@ -230,7 +230,7 @@ class SupabaseClient:
                 needing_summary_ids
             )
 
-        candidate_questions = []
+        candidate_questions: List[Dict[str, Any]] = []
         candidate_questions.extend(pending_candidates or [])
         candidate_questions.extend(stuck_candidates or [])
         candidate_questions.extend(commentary_only_questions or [])
@@ -270,7 +270,23 @@ class SupabaseClient:
         ids_to_process_raw: List[str] = []
         ids_to_cleanup: List[str] = []
 
-        for qid in candidate_ids:
+        # IMPORTANT BEHAVIOUR:
+        # - Questions that are currently marked as "pending" should ALWAYS be (re)processed,
+        #   even if they already have comments/summaries from a previous run.
+        #   This allows manually resetting ai_commentary_status back to "pending"
+        #   to trigger a re-run that overwrites data in the same ai_answer_comments row.
+        # - For "processing"/"completed" questions we keep the existing filtering behaviour
+        #   based on existing comments, summaries and error markers.
+        for question in candidate_questions:
+            qid = str(question["id"])
+            status = question.get("ai_commentary_status")
+
+            # Explicitly re-process anything that is currently pending
+            if status == "pending":
+                ids_to_process_raw.append(qid)
+                continue
+
+            # For non-pending questions, keep the original filtering logic
             if qid in existing_question_ids:
                 if qid in questions_with_errors:
                     ids_to_process_raw.append(qid)
