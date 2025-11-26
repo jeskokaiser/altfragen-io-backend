@@ -198,42 +198,31 @@ class SupabaseClient:
         delay_iso = delay_threshold.isoformat()
         stuck_iso = stuck_threshold.isoformat()
 
+        # Always prioritise fresh "pending" questions.
         pending_candidates = await self._select_questions(
             status="pending",
             queued_before_iso=delay_iso,
             limit=batch_size,
         )
-        stuck_candidates = await self._select_questions(
-            status="processing",
-            queued_before_iso=stuck_iso,
-            limit=batch_size,
+
+        # Only take "processing" (stuck) questions if there is remaining capacity
+        # in the current batch. This guarantees that, whenever pending questions
+        # exist, they fill the batch first.
+        remaining_capacity = max(
+            0, batch_size - len(pending_candidates or [])
         )
-
-        # Questions that have commentary but no summaries
-        questions_with_commentary = await self._select_questions_with_commentary(
-            limit=batch_size * 2
-        )
-        questions_with_summaries = await self._select_questions_with_summaries()
-
-        summary_ids = {
-            row["question_id"] for row in questions_with_summaries or []
-        }
-        needing_summary_ids = [
-            row["question_id"]
-            for row in (questions_with_commentary or [])
-            if row.get("question_id") not in summary_ids
-        ][:batch_size]
-
-        commentary_only_questions: List[Dict[str, Any]] = []
-        if needing_summary_ids:
-            commentary_only_questions = await self._select_questions_by_ids(
-                needing_summary_ids
+        if remaining_capacity > 0:
+            stuck_candidates = await self._select_questions(
+                status="processing",
+                queued_before_iso=stuck_iso,
+                limit=remaining_capacity,
             )
+        else:
+            stuck_candidates = []
 
         candidate_questions: List[Dict[str, Any]] = []
         candidate_questions.extend(pending_candidates or [])
         candidate_questions.extend(stuck_candidates or [])
-        candidate_questions.extend(commentary_only_questions or [])
 
         if not candidate_questions:
             return [], []
@@ -241,7 +230,6 @@ class SupabaseClient:
         candidate_ids: List[str] = [str(q["id"]) for q in candidate_questions]
 
         existing_comments = await self._select_existing_comments(candidate_ids)
-        existing_summaries = await self._select_existing_summaries(candidate_ids)
 
         # Questions with errors in any general comment field (contains "Fehler:")
         questions_with_errors = set()
@@ -262,10 +250,7 @@ class SupabaseClient:
 
         existing_question_ids = {
             *(str(c["question_id"]) for c in (existing_comments or [])),
-            *(str(s["question_id"]) for s in (existing_summaries or [])),
         }
-
-        commentary_only_ids = {str(q["id"]) for q in commentary_only_questions or []}
 
         ids_to_process_raw: List[str] = []
         ids_to_cleanup: List[str] = []
@@ -289,8 +274,6 @@ class SupabaseClient:
             # For non-pending questions, keep the original filtering logic
             if qid in existing_question_ids:
                 if qid in questions_with_errors:
-                    ids_to_process_raw.append(qid)
-                elif qid in commentary_only_ids:
                     ids_to_process_raw.append(qid)
                 else:
                     ids_to_cleanup.append(qid)
