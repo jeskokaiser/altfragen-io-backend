@@ -85,18 +85,23 @@ class SupabaseClient:
     async def _select_questions(
         self,
         status: str,
-        queued_before_iso: str,
+        processed_before_iso: Optional[str],
         limit: int,
     ) -> List[Dict[str, Any]]:
         def _select():
-            return (
+            query = (
                 self._client.table("questions")
                 .select("id,ai_commentary_status")
                 .eq("ai_commentary_status", status)
-                .lt("ai_commentary_queued_at", queued_before_iso)
-                .limit(limit)
-                .execute()
-            ).data
+            )
+
+            # Use ai_commentary_processed_at as the relevant timestamp for
+            # delay / stuck calculations instead of the legacy queued_at.
+            # If processed_before_iso is None, we don't apply any time filter.
+            if processed_before_iso is not None:
+                query = query.lt("ai_commentary_processed_at", processed_before_iso)
+
+            return query.limit(limit).execute().data
 
         return await self._run_sync(_select)
 
@@ -198,23 +203,29 @@ class SupabaseClient:
         delay_iso = delay_threshold.isoformat()
         stuck_iso = stuck_threshold.isoformat()
 
-        # Always prioritise fresh "pending" questions.
+        # Always prioritise questions that are currently marked as "pending".
+        # For pending questions we *ignore* the delay threshold and pick up to
+        # batch_size rows regardless of ai_commentary_queued_at, so that:
+        # - newly created questions are processed immediately
+        # - manually re-queued questions (status reset to 'pending') are not
+        #   filtered out just because queued_at is NULL or very recent.
         pending_candidates = await self._select_questions(
             status="pending",
-            queued_before_iso=delay_iso,
+            processed_before_iso=None,
             limit=batch_size,
         )
 
         # Only take "processing" (stuck) questions if there is remaining capacity
         # in the current batch. This guarantees that, whenever pending questions
-        # exist, they fill the batch first.
+        # exist, they fill the batch first. For stuck detection, we now compare
+        # against ai_commentary_processed_at instead of the legacy queued_at.
         remaining_capacity = max(
             0, batch_size - len(pending_candidates or [])
         )
         if remaining_capacity > 0:
             stuck_candidates = await self._select_questions(
                 status="processing",
-                queued_before_iso=stuck_iso,
+                processed_before_iso=stuck_iso,
                 limit=remaining_capacity,
             )
         else:
