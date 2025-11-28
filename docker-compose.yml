@@ -26,6 +26,7 @@ services:
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
+      - /opt/videos:/opt/videos
       - caddy_config:/config
     networks:
       - backend
