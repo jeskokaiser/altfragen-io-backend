@@ -1,6 +1,6 @@
 api.altfragen.io {
 
-    @old_root not path /parser* /ai*
+    @old_root not path /parser* /ai* /videos*
     handle @old_root {
         redir /parser{uri} 301
     }
@@ -11,5 +11,10 @@ api.altfragen.io {
 
     handle_path /ai* {
         reverse_proxy altfragen_ai:8000
+    }
+
+    handle_path /videos* {
+        root * /opt/videos
+        file_server
     }
 }
