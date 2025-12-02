@@ -91,7 +91,10 @@ class SupabaseClient:
         def _select():
             query = (
                 self._client.table("questions")
-                .select("id,ai_commentary_status")
+                # We include visibility and user_id so we can:
+                # - prioritise university-visible questions
+                # - gate private questions based on the owner's premium status
+                .select("id,ai_commentary_status,visibility,user_id")
                 .eq("ai_commentary_status", status)
             )
 
@@ -117,6 +120,76 @@ class SupabaseClient:
             ).data
 
         return await self._run_sync(_select)
+
+    async def _get_premium_users(
+        self,
+        user_ids: List[str],
+    ) -> Dict[str, bool]:
+        """
+        Fetch premium status for a list of user IDs.
+
+        Returns a mapping of user_id -> is_premium (bool).
+        Missing users default to False (non-premium).
+        """
+        # Deduplicate and filter out empty values
+        unique_ids = sorted({uid for uid in user_ids if uid})
+        if not unique_ids:
+            return {}
+
+        def _select():
+            return (
+                self._client.table("profiles")
+                .select("id,is_premium")
+                .in_("id", unique_ids)
+                .execute()
+            ).data
+
+        rows = await self._run_sync(_select)
+        premium_map: Dict[str, bool] = {}
+        for row in rows or []:
+            uid = str(row.get("id"))
+            premium_map[uid] = bool(row.get("is_premium"))
+        return premium_map
+
+    async def _get_private_quota(
+        self,
+        user_ids: List[str],
+        month_start: str,
+    ) -> Dict[str, Dict[str, int]]:
+        """
+        Fetch private AI commentary quota usage for a list of users for the
+        given calendar month (identified by its first day as ISO date).
+
+        Returns a mapping:
+          user_id -> {
+            "free_used_count": int,
+            "paid_credits_remaining": int,
+          }
+
+        Missing users default to zero usage and zero credits.
+        """
+        unique_ids = sorted({uid for uid in user_ids if uid})
+        if not unique_ids:
+            return {}
+
+        def _select():
+            return (
+                self._client.table("user_private_ai_quota")
+                .select("user_id,free_used_count,paid_credits_remaining,month_start")
+                .in_("user_id", unique_ids)
+                .eq("month_start", month_start)
+                .execute()
+            ).data
+
+        rows = await self._run_sync(_select)
+        quota_map: Dict[str, Dict[str, int]] = {}
+        for row in rows or []:
+            uid = str(row.get("user_id"))
+            quota_map[uid] = {
+                "free_used_count": int(row.get("free_used_count") or 0),
+                "paid_credits_remaining": int(row.get("paid_credits_remaining") or 0),
+            }
+        return quota_map
 
     async def _select_questions_with_summaries(self) -> List[Dict[str, Any]]:
         def _select():
@@ -203,6 +276,9 @@ class SupabaseClient:
         delay_iso = delay_threshold.isoformat()
         stuck_iso = stuck_threshold.isoformat()
 
+        # Identify current calendar month by its first day in UTC
+        month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc).date().isoformat()
+
         # Always prioritise questions that are currently marked as "pending".
         # For pending questions we *ignore* the delay threshold and pick up to
         # batch_size rows regardless of ai_commentary_queued_at, so that:
@@ -239,6 +315,16 @@ class SupabaseClient:
             return [], []
 
         candidate_ids: List[str] = [str(q["id"]) for q in candidate_questions]
+
+        # Build a small metadata map so we can prioritise / gate later
+        # visibility defaults to 'private' if not set (historic rows)
+        question_meta: Dict[str, Dict[str, Any]] = {}
+        for q in candidate_questions:
+            qid = str(q["id"])
+            question_meta[qid] = {
+                "visibility": (q.get("visibility") or "private"),
+                "user_id": q.get("user_id"),
+            }
 
         existing_comments = await self._select_existing_comments(candidate_ids)
 
@@ -291,7 +377,88 @@ class SupabaseClient:
             else:
                 ids_to_process_raw.append(qid)
 
-        ids_to_process = ids_to_process_raw[:batch_size]
+        # ------------------------------------------------------------------
+        # Prioritisation & gating:
+        # - University-visible questions are always processed first
+        # - Private questions are only processed for premium users
+        #   (quota / credits are enforced in a separate step)
+        # - Non-premium users' private questions are never processed
+        # ------------------------------------------------------------------
+
+        # Split into university vs private based on visibility
+        uni_ids: List[str] = []
+        private_ids: List[str] = []
+        for qid in ids_to_process_raw:
+            meta = question_meta.get(qid, {})
+            visibility = meta.get("visibility") or "private"
+            if visibility == "university":
+                uni_ids.append(qid)
+            else:
+                private_ids.append(qid)
+
+        # Resolve premium status for owners of private questions
+        private_user_ids = [
+            str(question_meta[qid].get("user_id"))
+            for qid in private_ids
+            if question_meta.get(qid, {}).get("user_id")
+        ]
+        premium_map = await self._get_premium_users(private_user_ids)
+
+        # Fetch monthly quota usage + paid credits for premium users.
+        # We enforce a strict base limit of 100 private questions per calendar
+        # month; additional processing is only allowed if paid credits exist.
+        BASE_MONTHLY_FREE_LIMIT = 100
+        quota_map = await self._get_private_quota(private_user_ids, month_start)
+
+        eligible_private_ids: List[str] = []
+        for qid in private_ids:
+            meta = question_meta.get(qid, {})
+            user_id = meta.get("user_id")
+            # If we don't know the owner, treat as non-premium for safety
+            if not user_id:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Skipping private question %s for AI commentary: missing user_id",
+                    qid,
+                )
+                continue
+            user_id_str = str(user_id)
+
+            # Explicitly skip private questions of non-premium users
+            if not premium_map.get(user_id_str, False):
+                import logging
+                logging.getLogger(__name__).info(
+                    "Skipping private question %s for non-premium user %s",
+                    qid,
+                    user_id_str,
+                )
+                continue
+
+            # Enforce per-user monthly limit for private questions:
+            # - up to 100 free processed questions per calendar month
+            # - plus any additional paid credits
+            quota = quota_map.get(user_id_str, {"free_used_count": 0, "paid_credits_remaining": 0})
+            free_used = quota.get("free_used_count", 0) or 0
+            paid_remaining = quota.get("paid_credits_remaining", 0) or 0
+
+            if free_used >= BASE_MONTHLY_FREE_LIMIT and paid_remaining <= 0:
+                # User has exhausted both free monthly quota and paid credits
+                import logging
+                logging.getLogger(__name__).info(
+                    "Skipping private question %s for user %s: monthly quota exhausted "
+                    "(free_used=%s, paid_credits_remaining=%s)",
+                    qid,
+                    user_id_str,
+                    free_used,
+                    paid_remaining,
+                )
+                continue
+
+            eligible_private_ids.append(qid)
+
+        # Final ordering: all university questions first, then eligible private
+        prioritised_ids: List[str] = uni_ids + eligible_private_ids
+        ids_to_process = prioritised_ids[:batch_size]
         return ids_to_process, ids_to_cleanup
 
     # -------------------------------------------------------------------------
@@ -405,9 +572,29 @@ class SupabaseClient:
         status: str,
         set_processed_at: bool = False,
     ) -> None:
-        from datetime import datetime, timezone
-
         def _update():
+            from datetime import datetime, timezone
+
+            # Read existing state first so we can decide whether this is the
+            # first time a question is marked as completed (for quota updates).
+            existing_resp = (
+                self._client.table("questions")
+                .select("ai_commentary_status,ai_commentary_processed_at,visibility,user_id")
+                .eq("id", question_id)
+                .limit(1)
+                .execute()
+            )
+            existing_rows = existing_resp.data or []
+            existing_row = existing_rows[0] if existing_rows else None
+
+            first_time_completed = False
+            if status == "completed" and existing_row is not None:
+                prev_status = existing_row.get("ai_commentary_status")
+                prev_processed_at = existing_row.get("ai_commentary_processed_at")
+                first_time_completed = (
+                    prev_status != "completed" or prev_processed_at is None
+                )
+
             payload: Dict[str, Any] = {"ai_commentary_status": status}
             if set_processed_at and status == "completed":
                 payload["ai_commentary_processed_at"] = datetime.now(
@@ -421,6 +608,70 @@ class SupabaseClient:
                 self._client.table("ai_answer_comments").update({
                     "processing_status": "completed"
                 }).eq("question_id", question_id).execute()
+
+            # If this is the first time a private question is completed, update
+            # the per-user monthly quota and paid credits.
+            if first_time_completed and existing_row is not None:
+                visibility = existing_row.get("visibility") or "private"
+                user_id = existing_row.get("user_id")
+                if visibility == "private" and user_id:
+                    from datetime import datetime as dt_mod, timezone as tz_mod
+
+                    now = dt_mod.now(tz_mod.utc)
+                    month_start = dt_mod(
+                        now.year, now.month, 1, tzinfo=tz_mod.utc
+                    ).date().isoformat()
+
+                    BASE_MONTHLY_FREE_LIMIT = 100
+
+                    # Fetch current quota for this user/month
+                    quota_resp = (
+                        self._client.table("user_private_ai_quota")
+                        .select("id,free_used_count,paid_credits_remaining")
+                        .eq("user_id", user_id)
+                        .eq("month_start", month_start)
+                        .limit(1)
+                        .execute()
+                    )
+                    quota_rows = quota_resp.data or []
+
+                    if quota_rows:
+                        quota_row = quota_rows[0]
+                        free_used = int(quota_row.get("free_used_count") or 0)
+                        paid_remaining = int(quota_row.get("paid_credits_remaining") or 0)
+
+                        # Prefer consuming from free monthly quota, then from paid credits.
+                        if free_used < BASE_MONTHLY_FREE_LIMIT:
+                            new_free_used = free_used + 1
+                            new_paid_remaining = paid_remaining
+                        elif paid_remaining > 0:
+                            new_free_used = free_used
+                            new_paid_remaining = paid_remaining - 1
+                        else:
+                            # Quota already exhausted; do not modify row.
+                            new_free_used = free_used
+                            new_paid_remaining = paid_remaining
+
+                        if (
+                            new_free_used != free_used
+                            or new_paid_remaining != paid_remaining
+                        ):
+                            self._client.table("user_private_ai_quota").update(
+                                {
+                                    "free_used_count": new_free_used,
+                                    "paid_credits_remaining": new_paid_remaining,
+                                }
+                            ).eq("id", quota_row["id"]).execute()
+                    else:
+                        # No quota row yet for this month: create one and consume from free quota.
+                        self._client.table("user_private_ai_quota").insert(
+                            {
+                                "user_id": user_id,
+                                "month_start": month_start,
+                                "free_used_count": 1,
+                                "paid_credits_remaining": 0,
+                            }
+                        ).execute()
 
         await self._run_sync(_update)
 
