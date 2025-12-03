@@ -40,7 +40,7 @@ services:
       - caddy_config:/config
     networks:
       - backend
-      - caddy
+      - supabase_grafana
 
 
 volumes:
@@ -49,5 +49,6 @@ volumes:
 
 networks:
   backend:
-  caddy:
+  supabase_grafana:
     external: true
+    name: supabase-grafana_default

@@ -25,5 +25,7 @@ api.altfragen.io {
 }
 
 metrics.altfragen.io {
-    reverse_proxy supabase_grafana:8080
+    encode gzip
+
+    reverse_proxy supabase-grafana-supabase-grafana-1:8080
 }
