@@ -23,7 +23,7 @@ services:
     env_file: .env
     volumes:
       - ./ai-comments:/app
-    command: python -m ai_comments.subject_job_worker
+    command: python subject_job_worker.py
     networks:
       - backend
     restart: unless-stopped
