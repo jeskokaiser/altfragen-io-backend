@@ -77,6 +77,7 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-https://api.altfragen.io/metrics}
       - GF_SERVER_SERVE_FROM_SUBPATH=true
+      - GF_APP_MODE=production
       - GF_INSTALL_PLUGINS=
     networks:
       - backend
