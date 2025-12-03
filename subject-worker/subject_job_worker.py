@@ -528,6 +528,18 @@ async def process_all_pending_jobs():
         logger.error(f"Error processing pending jobs: {error}", exc_info=True)
 
 
+async def polling_loop():
+    """Background polling loop as fallback if HTTP triggers fail."""
+    while True:
+        try:
+            await asyncio.sleep(CONFIG["POLL_INTERVAL"])
+            if supabase and openai_client:
+                await process_all_pending_jobs()
+        except Exception as error:
+            logger.error(f"Error in polling loop: {error}", exc_info=True)
+            await asyncio.sleep(CONFIG["POLL_INTERVAL"])
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize clients on startup."""
@@ -540,6 +552,10 @@ async def startup_event():
             raise RuntimeError("OPENAI_API_KEY not configured")
         openai_client = OpenAI(api_key=openai_api_key)
         logger.info("Subject job worker started and ready")
+        
+        # Start background polling loop as fallback
+        asyncio.create_task(polling_loop())
+        logger.info(f"Started background polling loop (interval: {CONFIG['POLL_INTERVAL']}s)")
     except Exception as e:
         logger.error(f"Failed to initialize clients: {e}", exc_info=True)
         raise
