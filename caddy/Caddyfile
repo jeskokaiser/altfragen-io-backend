@@ -21,4 +21,8 @@ api.altfragen.io {
         root * /opt/videos
         file_server
     }
+
+    handle_path /metrics* {
+        reverse_proxy supabase_grafana:3000
+    }
 }
