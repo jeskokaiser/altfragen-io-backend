@@ -1,6 +1,6 @@
 api.altfragen.io {
 
-    @old_root not path /parser* /ai* /videos* /metrics* /subject-worker*
+    @old_root not path /parser* /ai* /videos* /subject-worker*
     handle @old_root {
         redir /parser{uri} 301
     }
@@ -22,11 +22,8 @@ api.altfragen.io {
         file_server
     }
 
-    handle_path /metrics* {
-        reverse_proxy supabase_grafana:3000 {
-            header_up X-Forwarded-Prefix /metrics
-            header_up Host {host}
-            header_up X-Forwarded-Host {host}
-        }
-    }
+}
+
+metrics.altfragen.io {
+    reverse_proxy supabase_metrics_grafana:8080
 }
