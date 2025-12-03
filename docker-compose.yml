@@ -18,12 +18,11 @@ services:
       - backend
 
   altfragen_subject_worker:
-    build: ./ai-comments
+    build: ./subject-worker
     container_name: altfragen_subject_worker
     env_file: .env
     volumes:
-      - ./ai-comments:/app
-    command: python subject_job_worker.py
+      - ./subject-worker:/app
     networks:
       - backend
     restart: unless-stopped

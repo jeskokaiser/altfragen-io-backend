@@ -13,6 +13,10 @@ api.altfragen.io {
         reverse_proxy altfragen_ai:8000
     }
 
+    handle_path /subject-worker* {
+        reverse_proxy altfragen_subject_worker:8001
+    }
+
     handle_path /videos* {
         root * /opt/videos
         file_server

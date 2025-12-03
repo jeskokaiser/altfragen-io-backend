@@ -2,8 +2,10 @@
 """
 Subject Job Worker
 
-Long-running worker that processes subject assignment and reassignment jobs
+HTTP-triggered worker that processes subject assignment and reassignment jobs
 from the subject_jobs table. Handles both 'assign' and 'reassign' job types.
+
+Can be triggered via HTTP endpoint or run in polling mode as fallback.
 
 Configuration:
 - BATCH_SIZE: Number of questions to process in parallel (default: 2)
@@ -12,7 +14,7 @@ Configuration:
 - REQUEST_DELAY: Delay between batches in ms (default: 1200)
 - CHUNK_SIZE: Number of questions to process per chunk (default: 15)
 - CHUNK_DELAY: Delay between chunks in ms (default: 3000)
-- POLL_INTERVAL: Seconds to wait between polling for new jobs (default: 5)
+- POLL_INTERVAL: Seconds to wait between polling for new jobs (fallback mode, default: 60)
 """
 
 import asyncio
@@ -21,19 +23,26 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
+import uvicorn
 from openai import OpenAI
 
 from supabase_client import SupabaseClient
 
+# Load environment variables
+load_dotenv()
+
 # Configuration constants
 CONFIG = {
-    "BATCH_SIZE": 2,
+    "BATCH_SIZE": 5,
     "MAX_RETRIES": 3,
     "RETRY_DELAY": 1000,  # milliseconds
     "REQUEST_DELAY": 1200,  # milliseconds
-    "CHUNK_SIZE": 15,
-    "CHUNK_DELAY": 3000,  # milliseconds
-    "POLL_INTERVAL": 5,  # seconds
+    "CHUNK_SIZE": 20,
+    "CHUNK_DELAY": 1000,  # milliseconds
+    "POLL_INTERVAL": 60,  # seconds (fallback polling mode)
 }
 
 # Setup logging
@@ -42,6 +51,13 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Initialize FastAPI app
+app = FastAPI(title="Subject Job Worker", version="1.0.0")
+
+# Global clients (initialized on startup)
+supabase: Optional[SupabaseClient] = None
+openai_client: Optional[OpenAI] = None
 
 
 async def retry_with_backoff(
@@ -77,19 +93,19 @@ async def assign_subject_to_question(
     """
     # Build prompt based on job type (assign vs reassign have slightly different prompts)
     # For now, use the simpler assign prompt (English)
-    prompt = f"""You are a subject classifier for academic questions. Given the following question and list of available subjects, select the most appropriate subject.
+    prompt = f"""Du bist ein Fachklassifizierer für akademische Fragen. Wähle anhand der folgenden Frage und der Liste der verfügbaren Fächer das am besten geeignete Fach aus.
 
-Question: "{question.get('question', '')}"
+Frage: "{question.get('question', '')}"
 
-Available subjects: {', '.join(available_subjects)}
+Verfügbare Fächer: {', '.join(available_subjects)}
 
-Please respond with ONLY the exact subject name from the list above that best matches this question. Do not add any explanation or additional text."""
+Antworte mit NUR dem exakten Fachnamen aus der Liste oben, das am besten zu dieser Frage passt. Füge keine Erklärung oder zusätzlichen Text hinzu."""
 
-    system_prompt = "You are a precise subject classifier. Always respond with only the exact subject name from the provided list."
+    system_prompt = "Du bist ein präziser Fachklassifizierer. Antworte immer nur mit dem exakten Fachnamen aus der Liste oben."
 
     def call_openai():
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-nano",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
@@ -388,73 +404,147 @@ async def process_reassign_job(
     )
 
 
-async def main_loop():
-    """Main worker loop that polls for jobs and processes them."""
-    # Initialize clients
-    supabase = SupabaseClient()
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        logger.error("OPENAI_API_KEY not set in environment")
-        sys.exit(1)
-    openai_client = OpenAI(api_key=openai_api_key)
+async def process_job_by_id(job_id: str):
+    """Process a specific job by ID."""
+    if not supabase or not openai_client:
+        logger.error("Clients not initialized")
+        return
 
-    logger.info("Subject job worker started")
+    try:
+        # Fetch the job from database
+        pending_jobs = await supabase.fetch_pending_subject_jobs()
+        job = next((j for j in pending_jobs if j["id"] == job_id), None)
 
-    while True:
-        try:
-            # Fetch pending jobs
-            pending_jobs = await supabase.fetch_pending_subject_jobs()
+        if not job:
+            # Try to fetch any job with this ID (might already be processing)
+            logger.warning(f"Job {job_id} not found in pending jobs, may already be processed")
+            return
 
-            if not pending_jobs:
-                logger.debug(f"No pending jobs, sleeping for {CONFIG['POLL_INTERVAL']}s")
-                await asyncio.sleep(CONFIG["POLL_INTERVAL"])
-                continue
+        job_type = job.get("type", "unknown")
 
-            logger.info(f"Found {len(pending_jobs)} pending job(s)")
+        # Mark job as processing
+        await supabase.update_subject_job_status(
+            job_id, "processing", message="Starting processing"
+        )
 
-            # Process each job
-            for job in pending_jobs:
-                job_id = job["id"]
-                job_type = job.get("type", "unknown")
+        # Process based on job type
+        if job_type == "assign":
+            await process_assign_job(job, supabase, openai_client)
+        elif job_type == "reassign":
+            await process_reassign_job(job, supabase, openai_client)
+        else:
+            logger.error(f"Unknown job type: {job_type}")
+            await supabase.update_subject_job_status(
+                job_id,
+                "failed",
+                message=f"Unknown job type: {job_type}",
+            )
 
-                try:
-                    # Mark job as processing
-                    await supabase.update_subject_job_status(
-                        job_id, "processing", message="Starting processing"
-                    )
+    except Exception as error:
+        logger.error(f"Fatal error processing job {job_id}: {error}", exc_info=True)
+        if supabase:
+            await supabase.update_subject_job_status(
+                job_id,
+                "failed",
+                message=f"Processing failed: {str(error)}",
+            )
 
-                    # Process based on job type
-                    if job_type == "assign":
-                        await process_assign_job(job, supabase, openai_client)
-                    elif job_type == "reassign":
-                        await process_reassign_job(job, supabase, openai_client)
-                    else:
-                        logger.error(f"Unknown job type: {job_type}")
-                        await supabase.update_subject_job_status(
-                            job_id,
-                            "failed",
-                            message=f"Unknown job type: {job_type}",
-                        )
 
-                except Exception as error:
-                    logger.error(f"Fatal error processing job {job_id}: {error}", exc_info=True)
-                    await supabase.update_subject_job_status(
-                        job_id,
-                        "failed",
-                        message=f"Processing failed: {str(error)}",
-                    )
+# FastAPI endpoints
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {"status": "ok", "service": "subject-job-worker"}
 
-        except Exception as error:
-            logger.error(f"Error in main loop: {error}", exc_info=True)
-            await asyncio.sleep(CONFIG["POLL_INTERVAL"])
+
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    return {"status": "healthy", "service": "subject-job-worker"}
+
+
+@app.post("/process-job/{job_id}")
+async def trigger_process_job(job_id: str, background_tasks: BackgroundTasks):
+    """
+    Trigger processing of a specific job by ID.
+    This endpoint is called by Edge Functions when a new job is created.
+    """
+    try:
+        logger.info(f"Received request to process job {job_id}")
+        # Run in background task to avoid blocking
+        background_tasks.add_task(process_job_by_id, job_id)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "message": f"Job {job_id} queued for processing",
+                "job_id": job_id
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error triggering job processing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/process-pending")
+async def trigger_process_pending(background_tasks: BackgroundTasks):
+    """
+    Process all pending jobs. Useful as a fallback or manual trigger.
+    """
+    try:
+        logger.info("Received request to process all pending jobs")
+        background_tasks.add_task(process_all_pending_jobs)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "message": "Processing all pending jobs in background"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error triggering pending jobs processing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def process_all_pending_jobs():
+    """Process all pending jobs (fallback/polling mode)."""
+    if not supabase or not openai_client:
+        logger.error("Clients not initialized")
+        return
+
+    try:
+        pending_jobs = await supabase.fetch_pending_subject_jobs()
+
+        if not pending_jobs:
+            logger.debug("No pending jobs found")
+            return
+
+        logger.info(f"Found {len(pending_jobs)} pending job(s)")
+
+        for job in pending_jobs:
+            await process_job_by_id(job["id"])
+
+    except Exception as error:
+        logger.error(f"Error processing pending jobs: {error}", exc_info=True)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize clients on startup."""
+    global supabase, openai_client
+    try:
+        supabase = SupabaseClient()
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            logger.error("OPENAI_API_KEY not set in environment")
+            raise RuntimeError("OPENAI_API_KEY not configured")
+        openai_client = OpenAI(api_key=openai_api_key)
+        logger.info("Subject job worker started and ready")
+    except Exception as e:
+        logger.error(f"Failed to initialize clients: {e}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main_loop())
-    except KeyboardInterrupt:
-        logger.info("Worker stopped by user")
-    except Exception as error:
-        logger.error(f"Fatal error: {error}", exc_info=True)
-        sys.exit(1)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
 
