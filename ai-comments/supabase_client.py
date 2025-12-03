@@ -276,9 +276,6 @@ class SupabaseClient:
         delay_iso = delay_threshold.isoformat()
         stuck_iso = stuck_threshold.isoformat()
 
-        # Identify current calendar month by its first day in UTC
-        month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc).date().isoformat()
-
         # Always prioritise questions that are currently marked as "pending".
         # For pending questions we *ignore* the delay threshold and pick up to
         # batch_size rows regardless of ai_commentary_queued_at, so that:
@@ -314,9 +311,7 @@ class SupabaseClient:
         if not candidate_questions:
             return [], []
 
-        candidate_ids: List[str] = [str(q["id"]) for q in candidate_questions]
-
-        # Build a small metadata map so we can prioritise / gate later
+        # Build a small metadata map so we can prioritise / gate later.
         # visibility defaults to 'private' if not set (historic rows)
         question_meta: Dict[str, Dict[str, Any]] = {}
         for q in candidate_questions:
@@ -326,63 +321,26 @@ class SupabaseClient:
                 "user_id": q.get("user_id"),
             }
 
-        existing_comments = await self._select_existing_comments(candidate_ids)
-
-        # Questions with errors in any general comment field (contains "Fehler:")
-        questions_with_errors = set()
-        for comment in existing_comments or []:
-            for key in [
-                "openai_general_comment",
-                "gemini_general_comment",
-                "chatgpt_general_comment",
-                "mistral_general_comment",
-                "perplexity_general_comment",
-                "deepseek_general_comment",
-                "gemini_new_general_comment",
-            ]:
-                value = comment.get(key)
-                if isinstance(value, str) and "Fehler:" in value:
-                    questions_with_errors.add(str(comment["question_id"]))
-                    break
-
-        existing_question_ids = {
-            *(str(c["question_id"]) for c in (existing_comments or [])),
-        }
-
         ids_to_process_raw: List[str] = []
         ids_to_cleanup: List[str] = []
 
-        # IMPORTANT BEHAVIOUR:
-        # - Questions that are currently marked as "pending" should ALWAYS be (re)processed,
-        #   even if they already have comments/summaries from a previous run.
-        #   This allows manually resetting ai_commentary_status back to "pending"
-        #   to trigger a re-run that overwrites data in the same ai_answer_comments row.
-        # - For "processing"/"completed" questions we keep the existing filtering behaviour
-        #   based on existing comments, summaries and error markers.
+        # IMPORTANT BEHAVIOUR (simplified):
+        # - Any question that is currently "pending" or "processing" and made it
+        #   into candidate_questions should be (re)processed.
+        #   This allows:
+        #   - newly created questions to run immediately
+        #   - manually re-queued questions (status reset to 'pending')
+        #   - partially processed questions (some models done, others missing)
         for question in candidate_questions:
             qid = str(question["id"])
-            status = question.get("ai_commentary_status")
-
-            # Explicitly re-process anything that is currently pending
-            if status == "pending":
-                ids_to_process_raw.append(qid)
-                continue
-
-            # For non-pending questions, keep the original filtering logic
-            if qid in existing_question_ids:
-                if qid in questions_with_errors:
-                    ids_to_process_raw.append(qid)
-                else:
-                    ids_to_cleanup.append(qid)
-            else:
-                ids_to_process_raw.append(qid)
+            ids_to_process_raw.append(qid)
 
         # ------------------------------------------------------------------
         # Prioritisation & gating:
         # - University-visible questions are always processed first
         # - Private questions are only processed for premium users
-        #   (quota / credits are enforced in a separate step)
-        # - Non-premium users' private questions are never processed
+        #   (full vs overflow processing is enforced in a separate step)
+        # - Non-premium users' private questions are never processed at all
         # ------------------------------------------------------------------
 
         # Split into university vs private based on visibility
@@ -403,12 +361,6 @@ class SupabaseClient:
             if question_meta.get(qid, {}).get("user_id")
         ]
         premium_map = await self._get_premium_users(private_user_ids)
-
-        # Fetch monthly quota usage + paid credits for premium users.
-        # We enforce a strict base limit of 100 private questions per calendar
-        # month; additional processing is only allowed if paid credits exist.
-        BASE_MONTHLY_FREE_LIMIT = 100
-        quota_map = await self._get_private_quota(private_user_ids, month_start)
 
         eligible_private_ids: List[str] = []
         for qid in private_ids:
@@ -434,32 +386,157 @@ class SupabaseClient:
                 )
                 continue
 
-            # Enforce per-user monthly limit for private questions:
-            # - up to 100 free processed questions per calendar month
-            # - plus any additional paid credits
-            quota = quota_map.get(user_id_str, {"free_used_count": 0, "paid_credits_remaining": 0})
-            free_used = quota.get("free_used_count", 0) or 0
-            paid_remaining = quota.get("paid_credits_remaining", 0) or 0
-
-            if free_used >= BASE_MONTHLY_FREE_LIMIT and paid_remaining <= 0:
-                # User has exhausted both free monthly quota and paid credits
-                import logging
-                logging.getLogger(__name__).info(
-                    "Skipping private question %s for user %s: monthly quota exhausted "
-                    "(free_used=%s, paid_credits_remaining=%s)",
-                    qid,
-                    user_id_str,
-                    free_used,
-                    paid_remaining,
-                )
-                continue
-
             eligible_private_ids.append(qid)
 
         # Final ordering: all university questions first, then eligible private
         prioritised_ids: List[str] = uni_ids + eligible_private_ids
         ids_to_process = prioritised_ids[:batch_size]
         return ids_to_process, ids_to_cleanup
+
+    async def classify_quota_for_questions(
+        self,
+        questions: List[Dict[str, Any]],
+        models_enabled: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Classify questions into full-slot vs overflow processing based on
+        per-user monthly quota and existing comments.
+
+        Returns a mapping:
+          question_id -> {
+            "user_id": str | None,
+            "is_full_slot": bool,
+          }
+
+        Behaviour:
+        - University-visible questions are always treated as full-slot.
+        - Private questions of non-premium users are never expected here
+          (they are filtered out in find_candidates), but are treated as
+          overflow for safety.
+        - For premium private questions, we allocate up to
+          BASE_MONTHLY_FREE_LIMIT free full slots per calendar month plus any
+          paid credits, on a per-user basis.
+        - Within a user, questions are ordered backlog-first:
+          questions that already have some comments (older overflow) are
+          prioritised before brand-new questions.
+        """
+        from datetime import datetime, timezone
+
+        if not questions:
+            return {}
+
+        # Identify current calendar month by its first day in UTC
+        now = datetime.now(timezone.utc)
+        month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc).date().isoformat()
+
+        BASE_MONTHLY_FREE_LIMIT = 100
+
+        # Build basic metadata
+        classification: Dict[str, Dict[str, Any]] = {}
+        question_ids: List[str] = []
+        private_user_ids: List[str] = []
+
+        for q in questions:
+            qid = str(q.get("id"))
+            if not qid:
+                continue
+            question_ids.append(qid)
+
+            visibility = (q.get("visibility") or "private")
+            user_id = q.get("user_id")
+
+            classification[qid] = {
+                "user_id": str(user_id) if user_id else None,
+                "visibility": visibility,
+                "is_full_slot": False,  # default, will be updated below
+            }
+
+            if visibility == "private" and user_id:
+                private_user_ids.append(str(user_id))
+
+        # Resolve premium status and quota for owners of private questions
+        premium_map = await self._get_premium_users(private_user_ids)
+        quota_map = await self._get_private_quota(private_user_ids, month_start)
+
+        # Load existing comments to prioritise backlog questions
+        existing_comments = await self._select_existing_comments(question_ids)
+        comments_by_qid: Dict[str, Dict[str, Any]] = {}
+        for row in existing_comments or []:
+            qid = str(row.get("question_id"))
+            comments_by_qid[qid] = row
+
+        # Pre-compute whether a question already has any comments at all
+        has_any_comments: Dict[str, bool] = {
+            qid: qid in comments_by_qid for qid in question_ids
+        }
+
+        # University-visible questions are always full-slot
+        for q in questions:
+            qid = str(q.get("id"))
+            meta = classification.get(qid)
+            if not meta:
+                continue
+            if meta.get("visibility") == "university":
+                meta["is_full_slot"] = True
+
+        # Allocate per-user full slots for premium private questions
+        # in a backlog-first order.
+        # Group questions by user
+        per_user_questions: Dict[str, List[str]] = {}
+        for qid, meta in classification.items():
+            user_id = meta.get("user_id")
+            if not user_id:
+                continue
+            if meta.get("visibility") != "private":
+                continue
+            if not premium_map.get(user_id, False):
+                # Non-premium user: keep is_full_slot=False
+                continue
+            per_user_questions.setdefault(user_id, []).append(qid)
+
+        for user_id, qids in per_user_questions.items():
+            quota = quota_map.get(user_id, {"free_used_count": 0, "paid_credits_remaining": 0})
+            free_used = int(quota.get("free_used_count") or 0)
+            paid_remaining = int(quota.get("paid_credits_remaining") or 0)
+
+            remaining_free = max(0, BASE_MONTHLY_FREE_LIMIT - free_used)
+            slots_remaining = remaining_free + paid_remaining
+            if slots_remaining <= 0:
+                # All of this user's private questions become overflow this month
+                continue
+
+            # Sort user's questions:
+            # - First those that already have any comments (backlog / overflow from
+            #   previous processing), then those without comments.
+            # - Within each group, sort by ai_commentary_processed_at, then created_at,
+            #   then id as a final tie breaker.
+            def sort_key(qid: str):
+                # Prefer questions that already have comments
+                any_comments = has_any_comments.get(qid, False)
+                # Retrieve original question row
+                # (find first matching question in the provided list)
+                base = next((q for q in questions if str(q.get("id")) == qid), None)
+                processed_at = base.get("ai_commentary_processed_at") if base else None
+                created_at = base.get("created_at") if base else None
+                return (
+                    0 if any_comments else 1,
+                    processed_at or "",
+                    created_at or "",
+                    qid,
+                )
+
+            sorted_qids = sorted(qids, key=sort_key)
+
+            for qid in sorted_qids:
+                if slots_remaining <= 0:
+                    break
+                meta = classification.get(qid)
+                if not meta:
+                    continue
+                meta["is_full_slot"] = True
+                slots_remaining -= 1
+
+        return classification
 
     # -------------------------------------------------------------------------
     # Claiming & status updates

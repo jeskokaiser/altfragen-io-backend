@@ -94,24 +94,53 @@ async def main() -> None:
 
         logger.info("Claimed %d questions for processing.", len(claimed_questions))
 
+        # Classify questions into full-slot vs overflow based on per-user quota.
+        quota_classification = await supabase.classify_quota_for_questions(
+            claimed_questions, models_enabled
+        )
+
+        # Determine which questions should receive full multi-model processing.
+        full_question_ids = set()
+        for q in claimed_questions:
+            qid = str(q.get("id"))
+            visibility = (q.get("visibility") or "private")
+            if visibility == "university":
+                full_question_ids.add(qid)
+                continue
+            meta = quota_classification.get(qid) or {}
+            if meta.get("is_full_slot"):
+                full_question_ids.add(qid)
+
+        def is_full_slot_question(question: Dict[str, Any]) -> bool:
+            qid = str(question.get("id"))
+            return qid in full_question_ids
+
         # Submit provider-specific batch jobs based on models_enabled.
         # Each model is wrapped in try-except to ensure failures don't stop other models.
         
         # OpenAI / ChatGPT
         if models_enabled.get("chatgpt"):
             try:
-                logger.info("Submitting OpenAI batch for %d questions.", len(claimed_questions))
-                client = OpenAI()
-                batch_id, input_file_id, question_ids = submit_openai_batch(
-                    claimed_questions, client=client
-                )
-                await supabase.create_batch_job(
-                    provider="openai",
-                    batch_id=batch_id,
-                    input_file_id=input_file_id,
-                    question_ids=question_ids,
-                )
-                logger.info("Created OpenAI batch %s.", batch_id)
+                full_questions = [q for q in claimed_questions if is_full_slot_question(q)]
+                if not full_questions:
+                    logger.info("No questions eligible for OpenAI batch this run (full-slot quota exhausted).")
+                else:
+                    logger.info(
+                        "Submitting OpenAI batch for %d questions (out of %d claimed).",
+                        len(full_questions),
+                        len(claimed_questions),
+                    )
+                    client = OpenAI()
+                    batch_id, input_file_id, question_ids = submit_openai_batch(
+                        full_questions, client=client
+                    )
+                    await supabase.create_batch_job(
+                        provider="openai",
+                        batch_id=batch_id,
+                        input_file_id=input_file_id,
+                        question_ids=question_ids,
+                    )
+                    logger.info("Created OpenAI batch %s.", batch_id)
             except Exception as e:
                 logger.error("Failed to submit OpenAI batch: %s", e, exc_info=True)
                 # Check for quota error and disable feature if needed
@@ -128,17 +157,25 @@ async def main() -> None:
         # Gemini
         if models_enabled.get("gemini"):
             try:
-                logger.info("Submitting Gemini batch for %d questions.", len(claimed_questions))
-                gemini_client = genai.Client()
-                job_name, question_ids = submit_gemini_batch(
-                    claimed_questions, client=gemini_client
-                )
-                await supabase.create_batch_job(
-                    provider="gemini",
-                    batch_id=job_name,
-                    question_ids=question_ids,
-                )
-                logger.info("Created Gemini batch %s.", job_name)
+                full_questions = [q for q in claimed_questions if is_full_slot_question(q)]
+                if not full_questions:
+                    logger.info("No questions eligible for Gemini batch this run (full-slot quota exhausted).")
+                else:
+                    logger.info(
+                        "Submitting Gemini batch for %d questions (out of %d claimed).",
+                        len(full_questions),
+                        len(claimed_questions),
+                    )
+                    gemini_client = genai.Client()
+                    job_name, question_ids = submit_gemini_batch(
+                        full_questions, client=gemini_client
+                    )
+                    await supabase.create_batch_job(
+                        provider="gemini",
+                        batch_id=job_name,
+                        question_ids=question_ids,
+                    )
+                    logger.info("Created Gemini batch %s.", job_name)
             except Exception as e:
                 logger.error("Failed to submit Gemini batch: %s", e, exc_info=True)
                 # Check for quota error and disable feature if needed
@@ -209,6 +246,23 @@ async def main() -> None:
                 answer_comments: Dict[str, Any] = {}
                 errors: Dict[str, str] = {}
 
+                qid_str = str(question.get("id"))
+                full_slot = is_full_slot_question(question)
+
+                # Decide which instant models to use for this question:
+                # - full-slot questions: all enabled instant models
+                # - overflow questions: DeepSeek only (if enabled)
+                if full_slot:
+                    models_for_question = list(instant_models)
+                else:
+                    models_for_question = [
+                        (name, fn) for name, fn in instant_models if name == "deepseek"
+                    ]
+
+                if not models_for_question:
+                    # Nothing to do for this question in the instant pipeline
+                    return
+
                 # Call all instant models in parallel with individual error handling
                 async def call_model_safely(model_name: str, generate_fn) -> tuple[str, Any]:
                     """Call a model and return (model_name, result_or_exception)"""
@@ -233,7 +287,7 @@ async def main() -> None:
                 # Call all models in parallel
                 tasks = [
                     call_model_safely(model_name, generate_fn)
-                    for model_name, generate_fn in instant_models
+                    for model_name, generate_fn in models_for_question
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=False)
 
