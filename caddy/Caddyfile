@@ -22,7 +22,13 @@ api.altfragen.io {
         file_server
     }
 
-    handle_path /metrics* {
-        reverse_proxy supabase_grafana:3000
+    @metrics {
+        path /metrics*
+    }
+    handle @metrics {
+        uri strip_prefix /metrics
+        reverse_proxy supabase_grafana:3000 {
+            header_up X-Forwarded-Prefix /metrics
+        }
     }
 }
