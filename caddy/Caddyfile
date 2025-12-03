@@ -25,7 +25,10 @@ api.altfragen.io {
     handle_path /metrics* {
         reverse_proxy supabase_grafana:3000 {
             header_up X-Forwarded-Prefix /metrics
+            header_up X-Forwarded-Uri {uri}
             header_up Host {host}
+            header_up X-Forwarded-Host {host}
+            header_up X-Forwarded-Proto {scheme}
         }
     }
 }
