@@ -144,7 +144,7 @@ async def process_assign_job(
 ) -> None:
     """Process an 'assign' type job."""
     job_id = job["id"]
-    payload = job.get("payload", {})
+    payload = job.get("payload") or {}
     questions = payload.get("questions", [])
     available_subjects = job.get("available_subjects", [])
     user_id = job.get("user_id")
@@ -253,12 +253,11 @@ async def process_reassign_job(
 ) -> None:
     """Process a 'reassign' type job."""
     job_id = job["id"]
-    payload = job.get("payload", {})
-    exam_name = payload.get("exam_name") or job.get("exam_name")
-    university_id = payload.get("university_id") or job.get("university_id")
-    only_null_subjects = payload.get("only_null_subjects", False) or job.get(
-        "only_null_subjects", False
-    )
+    payload = job.get("payload") or {}
+    # For reassign jobs, data is stored directly in job fields, not in payload
+    exam_name = job.get("exam_name")
+    university_id = job.get("university_id")
+    only_null_subjects = job.get("only_null_subjects", False)
     available_subjects = job.get("available_subjects", [])
 
     if not exam_name or not available_subjects:
