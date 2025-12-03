@@ -17,6 +17,17 @@ services:
     networks:
       - backend
 
+  altfragen_subject_worker:
+    build: ./ai-comments
+    container_name: altfragen_subject_worker
+    env_file: .env
+    volumes:
+      - ./ai-comments:/app
+    command: python -m ai_comments.subject_job_worker
+    networks:
+      - backend
+    restart: unless-stopped
+
   caddy:
     image: caddy:2
     container_name: caddy_reverse_proxy
