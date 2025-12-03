@@ -30,7 +30,7 @@ If the file is missing or empty, download it:
 ```bash
 mkdir -p grafana/dashboards
 curl -o grafana/dashboards/supabase.json \
-  https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboards/supabase.json
+  https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboard.json
 ```
 
 ### 3. Check Caddy Access Logs

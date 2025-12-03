@@ -49,7 +49,7 @@ This will:
 **Note:** If the script fails to download the dashboard, you can download it manually:
 ```bash
 mkdir -p grafana/dashboards
-curl -o grafana/dashboards/supabase.json https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboards/supabase.json
+curl -o grafana/dashboards/supabase.json https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboard.json
 ```
 
 ### 3. Start the Services
@@ -129,7 +129,7 @@ To update to the latest Supabase dashboard:
 
 ```bash
 cd /Users/jeskokaiser/Desktop/altfragen-io-backend/supabase-metrics/grafana/dashboards
-curl -o supabase.json https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboards/supabase.json
+curl -o supabase.json https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboard.json
 cd ../..
 docker-compose restart supabase_grafana
 ```

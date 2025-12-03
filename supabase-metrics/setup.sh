@@ -21,13 +21,18 @@ fi
 echo "Downloading Supabase Grafana dashboard..."
 mkdir -p grafana/dashboards
 curl -s -o grafana/dashboards/supabase.json \
-  https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboards/supabase.json
+  https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboard.json
 
 if [ $? -eq 0 ]; then
+    # Verify it's valid JSON (not an error page)
+    if grep -q "404\|Not Found" grafana/dashboards/supabase.json 2>/dev/null; then
+        echo "❌ Download failed - got 404 error"
+        exit 1
+    fi
     echo "✅ Dashboard downloaded successfully"
 else
     echo "❌ Failed to download dashboard. Please download manually:"
-    echo "   curl -o grafana/dashboards/supabase.json https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboards/supabase.json"
+    echo "   curl -o grafana/dashboards/supabase.json https://raw.githubusercontent.com/supabase/supabase-grafana/main/dashboard.json"
     exit 1
 fi
 
