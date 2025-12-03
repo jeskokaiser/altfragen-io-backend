@@ -110,7 +110,7 @@ Antworte mit NUR dem exakten Fachnamen aus der Liste oben, das am besten zu dies
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.1,
+
 
         )
         return response.choices[0].message.content.strip()
