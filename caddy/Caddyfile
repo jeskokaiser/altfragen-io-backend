@@ -25,5 +25,5 @@ api.altfragen.io {
 }
 
 metrics.altfragen.io {
-    reverse_proxy supabase_metrics_grafana:8080
+    reverse_proxy supabase_grafana:8080
 }
