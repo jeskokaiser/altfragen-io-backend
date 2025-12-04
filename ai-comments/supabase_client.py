@@ -87,6 +87,8 @@ class SupabaseClient:
         status: str,
         processed_before_iso: Optional[str],
         limit: int,
+        visibility: Optional[str] = None,
+        user_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         def _select():
             query = (
@@ -103,6 +105,17 @@ class SupabaseClient:
             # If processed_before_iso is None, we don't apply any time filter.
             if processed_before_iso is not None:
                 query = query.lt("ai_commentary_processed_at", processed_before_iso)
+
+            # Optional visibility filter
+            if visibility is not None:
+                query = query.eq("visibility", visibility)
+
+            # Optional user filter (used for premium subscribers)
+            if user_ids:
+                query = query.in_("user_id", user_ids)
+
+            # Always process oldest questions first within the filtered set
+            query = query.order("created_at", desc=False)
 
             return query.limit(limit).execute().data
 
@@ -126,7 +139,7 @@ class SupabaseClient:
         user_ids: List[str],
     ) -> Dict[str, bool]:
         """
-        Fetch premium status for a list of user IDs.
+        Fetch premium status for a list of user IDs based on active subscriptions.
 
         Returns a mapping of user_id -> is_premium (bool).
         Missing users default to False (non-premium).
@@ -138,27 +151,28 @@ class SupabaseClient:
 
         def _select():
             return (
-                self._client.table("profiles")
-                .select("id,is_premium")
-                .in_("id", unique_ids)
+                self._client.table("subscribers")
+                .select("user_id,subscribed")
+                .in_("user_id", unique_ids)
+                .eq("subscribed", True)
                 .execute()
             ).data
 
         rows = await self._run_sync(_select)
         premium_map: Dict[str, bool] = {}
         for row in rows or []:
-            uid = str(row.get("id"))
-            premium_map[uid] = bool(row.get("is_premium"))
+            uid = str(row.get("user_id"))
+            # If a user has an active subscription, treat as premium
+            premium_map[uid] = True
         return premium_map
 
     async def _get_private_quota(
         self,
         user_ids: List[str],
-        month_start: str,
     ) -> Dict[str, Dict[str, int]]:
         """
         Fetch private AI commentary quota usage for a list of users for the
-        given calendar month (identified by its first day as ISO date).
+        current rolling 30-day window.
 
         Returns a mapping:
           user_id -> {
@@ -172,12 +186,19 @@ class SupabaseClient:
         if not unique_ids:
             return {}
 
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        # Identify the lower bound for the current rolling 30-day window
+        window_start = (now - timedelta(days=30)).date().isoformat()
+
         def _select():
             return (
                 self._client.table("user_private_ai_quota")
                 .select("user_id,free_used_count,paid_credits_remaining,month_start")
                 .in_("user_id", unique_ids)
-                .eq("month_start", month_start)
+                # Only consider windows that started within the last 30 days
+                .gte("month_start", window_start)
                 .execute()
             ).data
 
@@ -185,11 +206,29 @@ class SupabaseClient:
         quota_map: Dict[str, Dict[str, int]] = {}
         for row in rows or []:
             uid = str(row.get("user_id"))
-            quota_map[uid] = {
-                "free_used_count": int(row.get("free_used_count") or 0),
-                "paid_credits_remaining": int(row.get("paid_credits_remaining") or 0),
+            existing = quota_map.get(uid)
+
+            # If multiple rows exist within the window, keep the one with the
+            # latest month_start as the active window.
+            if existing is None or str(row.get("month_start")) > existing.get(
+                "month_start", ""
+            ):
+                quota_map[uid] = {
+                    "free_used_count": int(row.get("free_used_count") or 0),
+                    "paid_credits_remaining": int(
+                        row.get("paid_credits_remaining") or 0
+                    ),
+                    "month_start": str(row.get("month_start")),
+                }
+
+        # Strip month_start from the returned structure (callers don't need it)
+        return {
+            uid: {
+                "free_used_count": data["free_used_count"],
+                "paid_credits_remaining": data["paid_credits_remaining"],
             }
-        return quota_map
+            for uid, data in quota_map.items()
+        }
 
     async def _select_questions_with_summaries(self) -> List[Dict[str, Any]]:
         def _select():
@@ -276,25 +315,65 @@ class SupabaseClient:
         delay_iso = delay_threshold.isoformat()
         stuck_iso = stuck_threshold.isoformat()
 
-        # Always prioritise questions that are currently marked as "pending".
-        # For pending questions we *ignore* the delay threshold and pick up to
-        # batch_size rows regardless of ai_commentary_queued_at, so that:
-        # - newly created questions are processed immediately
-        # - manually re-queued questions (status reset to 'pending') are not
-        #   filtered out just because queued_at is NULL or very recent.
-        pending_candidates = await self._select_questions(
+        # ------------------------------------------------------------------
+        # Step 1: fetch pending questions with strict priority rules
+        #   1) University questions (visibility = 'university')
+        #   2) Private questions of premium users (via subscribers.subscribed = true)
+        #   NEVER: private questions of non-premium users
+        # ------------------------------------------------------------------
+
+        # University-visible pending questions first
+        pending_uni = await self._select_questions(
             status="pending",
             processed_before_iso=None,
             limit=batch_size,
+            visibility="university",
         )
+
+        remaining_capacity_for_pending = max(0, batch_size - len(pending_uni or []))
+
+        # Premium private pending questions next, if there is remaining capacity
+        if remaining_capacity_for_pending > 0:
+            # Determine all premium subscriber user_ids
+            def _select_premium_ids():
+                return (
+                    self._client.table("subscribers")
+                    .select("user_id,subscribed")
+                    .eq("subscribed", True)
+                    .execute()
+                ).data
+
+            premium_rows = await self._run_sync(_select_premium_ids)
+            premium_user_ids = sorted(
+                {
+                    str(row.get("user_id"))
+                    for row in (premium_rows or [])
+                    if row.get("user_id") is not None
+                }
+            )
+
+            if premium_user_ids:
+                pending_private_premium = await self._select_questions(
+                    status="pending",
+                    processed_before_iso=None,
+                    limit=remaining_capacity_for_pending,
+                    visibility="private",
+                    user_ids=premium_user_ids,
+                )
+            else:
+                pending_private_premium = []
+        else:
+            pending_private_premium = []
+
+        pending_candidates: List[Dict[str, Any]] = []
+        pending_candidates.extend(pending_uni or [])
+        pending_candidates.extend(pending_private_premium or [])
 
         # Only take "processing" (stuck) questions if there is remaining capacity
         # in the current batch. This guarantees that, whenever pending questions
         # exist, they fill the batch first. For stuck detection, we now compare
         # against ai_commentary_processed_at instead of the legacy queued_at.
-        remaining_capacity = max(
-            0, batch_size - len(pending_candidates or [])
-        )
+        remaining_capacity = max(0, batch_size - len(pending_candidates or []))
         if remaining_capacity > 0:
             stuck_candidates = await self._select_questions(
                 status="processing",
@@ -425,10 +504,6 @@ class SupabaseClient:
         if not questions:
             return {}
 
-        # Identify current calendar month by its first day in UTC
-        now = datetime.now(timezone.utc)
-        month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc).date().isoformat()
-
         BASE_MONTHLY_FREE_LIMIT = 100
 
         # Build basic metadata
@@ -456,7 +531,7 @@ class SupabaseClient:
 
         # Resolve premium status and quota for owners of private questions
         premium_map = await self._get_premium_users(private_user_ids)
-        quota_map = await self._get_private_quota(private_user_ids, month_start)
+        quota_map = await self._get_private_quota(private_user_ids)
 
         # Load existing comments to prioritise backlog questions
         existing_comments = await self._select_existing_comments(question_ids)
@@ -692,21 +767,23 @@ class SupabaseClient:
                 visibility = existing_row.get("visibility") or "private"
                 user_id = existing_row.get("user_id")
                 if visibility == "private" and user_id:
-                    from datetime import datetime as dt_mod, timezone as tz_mod
+                    from datetime import datetime as dt_mod, timedelta as td_mod, timezone as tz_mod
 
                     now = dt_mod.now(tz_mod.utc)
-                    month_start = dt_mod(
-                        now.year, now.month, 1, tzinfo=tz_mod.utc
-                    ).date().isoformat()
+                    today = now.date().isoformat()
+                    # Lower bound for the current rolling 30-day window
+                    window_start = (now - td_mod(days=30)).date().isoformat()
 
                     BASE_MONTHLY_FREE_LIMIT = 100
 
-                    # Fetch current quota for this user/month
+                    # Fetch current quota window for this user (latest month_start
+                    # within the last 30 days, if any)
                     quota_resp = (
                         self._client.table("user_private_ai_quota")
-                        .select("id,free_used_count,paid_credits_remaining")
+                        .select("id,free_used_count,paid_credits_remaining,month_start")
                         .eq("user_id", user_id)
-                        .eq("month_start", month_start)
+                        .gte("month_start", window_start)
+                        .order("month_start", desc=True)
                         .limit(1)
                         .execute()
                     )
@@ -717,7 +794,7 @@ class SupabaseClient:
                         free_used = int(quota_row.get("free_used_count") or 0)
                         paid_remaining = int(quota_row.get("paid_credits_remaining") or 0)
 
-                        # Prefer consuming from free monthly quota, then from paid credits.
+                        # Prefer consuming from free 30-day quota, then from paid credits.
                         if free_used < BASE_MONTHLY_FREE_LIMIT:
                             new_free_used = free_used + 1
                             new_paid_remaining = paid_remaining
@@ -740,11 +817,12 @@ class SupabaseClient:
                                 }
                             ).eq("id", quota_row["id"]).execute()
                     else:
-                        # No quota row yet for this month: create one and consume from free quota.
+                        # No active quota window in the last 30 days: create one
+                        # starting today and consume from free quota.
                         self._client.table("user_private_ai_quota").insert(
                             {
                                 "user_id": user_id,
-                                "month_start": month_start,
+                                "month_start": today,
                                 "free_used_count": 1,
                                 "paid_credits_remaining": 0,
                             }
