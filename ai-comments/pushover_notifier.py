@@ -106,8 +106,7 @@ class PushoverNotifier:
         return await self.send_notification(
             title=f"AI Commentary Error: {context}",
             message=message,
-            priority=1,  # High priority for errors
-            sound="siren",  # Alert sound for errors
+            priority=0,  # Normal priority for errors
         )
     
     async def notify_critical(
@@ -134,8 +133,7 @@ class PushoverNotifier:
         return await self.send_notification(
             title=f"AI Commentary Critical: {context}",
             message=full_message,
-            priority=1,  # High priority
-            sound="siren",
+            priority=1,  # High priority for critical errors
         )
     
     async def notify_warning(
