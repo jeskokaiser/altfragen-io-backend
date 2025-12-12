@@ -53,8 +53,9 @@ services:
       - |
         cp /etc/prometheus/prometheus.yml /tmp/prometheus.yml
         cp /etc/prometheus/alerts.yml /tmp/alerts.yml 2>/dev/null || true
-        sed -i "s|\${SUPABASE_PROJECT_REF}|${SUPABASE_PROJECT_REF}|g" /tmp/prometheus.yml
-        sed -i "s|\${SUPABASE_SERVICE_ROLE_KEY}|${SUPABASE_SERVICE_ROLE_KEY}|g" /tmp/prometheus.yml
+        # Substitute environment variables - escape $ in pattern, use env var in replacement
+        sed -i "s|\\\${SUPABASE_PROJECT_REF}|${SUPABASE_PROJECT_REF}|g" /tmp/prometheus.yml
+        sed -i "s|\\\${SUPABASE_SERVICE_ROLE_KEY}|${SUPABASE_SERVICE_ROLE_KEY}|g" /tmp/prometheus.yml
         exec /bin/prometheus --config.file=/tmp/prometheus.yml \
           --storage.tsdb.path=/prometheus \
           --web.console.libraries=/usr/share/prometheus/console_libraries \
