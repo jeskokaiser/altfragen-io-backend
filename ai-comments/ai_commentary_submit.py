@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from typing import Any, Dict, List
+from datetime import datetime, timezone
 
 from openai import OpenAI
 from google import genai
@@ -18,6 +19,335 @@ from quota_detector import is_quota_error, extract_quota_message
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ai_commentary_submit")
+
+async def submit_claimed_jobs(worker_id: str, jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Submit AI commentary processing for an explicit list of claimed queue jobs.
+    This is called by the /process-batch endpoint (Edge dispatcher is the selector).
+    """
+    supabase = SupabaseClient()
+    try:
+        settings = await supabase.fetch_settings()
+        if not settings["feature_enabled"]:
+            logger.info("AI commentary feature is disabled; skipping process-batch.")
+            return {"status": "disabled", "submitted": 0}
+
+        models_enabled: Dict[str, Any] = settings["models_enabled"] or {}
+
+        job_ids = [str(j.get("id")) for j in jobs if j.get("id")]
+        db_jobs = await supabase.fetch_queue_jobs(job_ids)
+        db_by_id = {str(j.get("id")): j for j in (db_jobs or []) if j.get("id")}
+
+        now = datetime.now(timezone.utc)
+
+        # Validate claimed-by + lease before doing any work.
+        valid_job_payloads: List[Dict[str, Any]] = []
+        for req_job in jobs:
+            jid = str(req_job.get("id"))
+            row = db_by_id.get(jid)
+            if not row:
+                continue
+            if row.get("status") != "processing" or str(row.get("claimed_by") or "") != str(worker_id):
+                continue
+            lease = row.get("lease_expires_at")
+            if lease:
+                try:
+                    lease_dt = datetime.fromisoformat(str(lease).replace("Z", "+00:00"))
+                except Exception:
+                    lease_dt = None
+                if lease_dt is not None and lease_dt <= now:
+                    await supabase.update_queue_job(
+                        jid,
+                        {
+                            "status": "pending",
+                            "claimed_by": None,
+                            "claimed_at": None,
+                            "lease_expires_at": None,
+                            "last_error": "lease_expired_before_start",
+                            "updated_at": now.isoformat(),
+                        },
+                    )
+                    continue
+            valid_job_payloads.append(
+                {
+                    "id": jid,
+                    "question_id": str(row.get("question_id") or req_job.get("question_id")),
+                    "target_level": str(row.get("target_level") or req_job.get("target_level") or "full"),
+                }
+            )
+
+        if not valid_job_payloads:
+            return {"status": "ok", "submitted": 0}
+
+        question_ids = [j["question_id"] for j in valid_job_payloads if j.get("question_id")]
+        question_rows = await supabase.fetch_questions_by_ids(question_ids)
+        question_by_id = {str(q.get("id")): q for q in (question_rows or []) if q.get("id")}
+
+        eligible_questions: List[Dict[str, Any]] = []
+        full_question_ids = set()
+
+        # Defensive checks (status, visibility, premium gating).
+        for job in valid_job_payloads:
+            jid = job["id"]
+            qid = job["question_id"]
+            q = question_by_id.get(qid)
+            if not q:
+                await supabase.update_queue_job(
+                    jid,
+                    {
+                        "status": "failed",
+                        "last_error": "question_not_found",
+                        "updated_at": now.isoformat(),
+                    },
+                )
+                continue
+
+            if (q.get("ai_commentary_status") or "pending") != "pending":
+                # Only process questions that are pending (strict rule).
+                await supabase.update_queue_job(
+                    jid,
+                    {
+                        "status": "failed",
+                        "last_error": "question_not_pending",
+                        "updated_at": now.isoformat(),
+                    },
+                )
+                continue
+
+            visibility = (q.get("visibility") or "private")
+            if visibility == "private":
+                user_id = q.get("user_id")
+                if not user_id or not await supabase.is_premium_user(str(user_id)):
+                    await supabase.update_queue_job(
+                        jid,
+                        {
+                            "status": "blocked",
+                            "last_error": "blocked_non_premium_private",
+                            "updated_at": now.isoformat(),
+                        },
+                    )
+                    continue
+
+                if job.get("target_level") == "full":
+                    full_question_ids.add(qid)
+            else:
+                # University questions are always full processing.
+                full_question_ids.add(qid)
+
+            eligible_questions.append(q)
+
+        if not eligible_questions:
+            return {"status": "ok", "submitted": 0}
+
+        # Mark questions as processing (pending -> processing).
+        await supabase.mark_questions_processing([str(q.get("id")) for q in eligible_questions if q.get("id")])
+
+        def is_full_slot_question(question: Dict[str, Any]) -> bool:
+            qid = str(question.get("id"))
+            return qid in full_question_ids
+
+        claimed_questions = eligible_questions
+
+        # OpenAI / ChatGPT: only full-slot questions
+        if models_enabled.get("chatgpt"):
+            try:
+                full_questions = [q for q in claimed_questions if is_full_slot_question(q)]
+                if not full_questions:
+                    logger.info("No questions eligible for OpenAI batch this run (partial-only jobs).")
+                else:
+                    logger.info("Submitting OpenAI batch for %d questions.", len(full_questions))
+                    client = OpenAI()
+                    batch_id, input_file_id, question_ids = submit_openai_batch(
+                        full_questions, client=client
+                    )
+                    await supabase.create_batch_job(
+                        provider="openai",
+                        batch_id=batch_id,
+                        input_file_id=input_file_id,
+                        question_ids=question_ids,
+                    )
+                    logger.info("Created OpenAI batch %s.", batch_id)
+            except Exception as e:
+                logger.error("Failed to submit OpenAI batch: %s", e, exc_info=True)
+                await handle_quota_error(supabase, "OpenAI", e)
+
+        # Gemini: only full-slot questions
+        if models_enabled.get("gemini"):
+            try:
+                full_questions = [q for q in claimed_questions if is_full_slot_question(q)]
+                if not full_questions:
+                    logger.info("No questions eligible for Gemini batch this run (partial-only jobs).")
+                else:
+                    logger.info("Submitting Gemini batch for %d questions.", len(full_questions))
+                    gemini_client = genai.Client()
+                    job_name, question_ids = submit_gemini_batch(
+                        full_questions, client=gemini_client
+                    )
+                    await supabase.create_batch_job(
+                        provider="gemini",
+                        batch_id=job_name,
+                        question_ids=question_ids,
+                    )
+                    logger.info("Created Gemini batch %s.", job_name)
+            except Exception as e:
+                logger.error("Failed to submit Gemini batch: %s", e, exc_info=True)
+                await handle_quota_error(supabase, "Gemini", e)
+
+        # Mistral: runs for both full + partial jobs
+        if models_enabled.get("mistral"):
+            try:
+                logger.info("Submitting Mistral batch for %d questions.", len(claimed_questions))
+                import os
+                mistral_api_key = os.getenv("MISTRAL_API_KEY")
+                if not mistral_api_key:
+                    logger.error("MISTRAL_API_KEY environment variable is not set, skipping Mistral batch")
+                else:
+                    mistral_client = Mistral(api_key=mistral_api_key)
+                    job_id, question_ids = submit_mistral_batch(
+                        claimed_questions, client=mistral_client
+                    )
+                    await supabase.create_batch_job(
+                        provider="mistral",
+                        batch_id=job_id,
+                        question_ids=question_ids,
+                    )
+                    logger.info("Created Mistral batch %s.", job_id)
+            except Exception as e:
+                logger.error("Failed to submit Mistral batch: %s", e, exc_info=True)
+                await handle_quota_error(supabase, "Mistral", e)
+
+        # Instant APIs:
+        # - Full jobs: all enabled instant models
+        # - Partial jobs: DeepSeek only (if enabled)
+        instant_models = []
+        if models_enabled.get("perplexity"):
+            instant_models.append(("perplexity", generate_perplexity_commentary))
+        if models_enabled.get("deepseek"):
+            instant_models.append(("deepseek", generate_deepseek_commentary))
+
+        if instant_models:
+            logger.info(
+                "Processing %d questions with instant APIs: %s",
+                len(claimed_questions),
+                ", ".join(name for name, _ in instant_models),
+            )
+
+            model_failure_counts: Dict[str, int] = {name: 0 for name, _ in instant_models}
+            total_calls = {name: 0 for name, _ in instant_models}
+
+            async def process_question_with_instant_models(question: Dict[str, Any]) -> None:
+                answer_comments: Dict[str, Any] = {}
+                errors: Dict[str, str] = {}
+
+                qid_str = str(question.get("id"))
+                full_slot = is_full_slot_question(question)
+
+                if full_slot:
+                    models_for_question = list(instant_models)
+                else:
+                    models_for_question = [
+                        (name, fn) for name, fn in instant_models if name == "deepseek"
+                    ]
+
+                if not models_for_question:
+                    return
+
+                async def call_model_safely(model_name: str, generate_fn) -> tuple[str, Any]:
+                    nonlocal model_failure_counts, total_calls
+                    total_calls[model_name] += 1
+                    try:
+                        result = await generate_fn(question)
+                        return (model_name, result)
+                    except Exception as e:
+                        model_failure_counts[model_name] += 1
+                        logger.error(
+                            "%s error for question %s: %s",
+                            model_name,
+                            question["id"],
+                            e,
+                            exc_info=True,
+                        )
+                        await handle_quota_error(supabase, model_name.capitalize(), e)
+                        return (model_name, e)
+
+                tasks = [
+                    call_model_safely(model_name, generate_fn)
+                    for model_name, generate_fn in models_for_question
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=False)
+
+                model_versions = {
+                    "perplexity": PERPLEXITY_MODEL_VERSION,
+                    "deepseek": DEEPSEEK_MODEL_VERSION,
+                }
+
+                for model_name, result in results:
+                    if isinstance(result, Exception):
+                        errors[model_name] = str(result)
+                        answer_comments[model_name] = {
+                            "chosen_answer": None,
+                            "general_comment": f"Fehler: {result}",
+                            "comment_a": f"Fehler: {result}",
+                            "comment_b": f"Fehler: {result}",
+                            "comment_c": f"Fehler: {result}",
+                            "comment_d": f"Fehler: {result}",
+                            "comment_e": f"Fehler: {result}",
+                            "processing_status": "failed",
+                            "model_version": model_versions.get(model_name),
+                        }
+                    else:
+                        answer_comments[model_name] = {
+                            **result,
+                            "processing_status": "completed",
+                            "model_version": model_versions.get(model_name),
+                        }
+
+                if answer_comments:
+                    try:
+                        await supabase.upsert_comments(question["id"], answer_comments)
+                    except Exception as e:
+                        logger.error(
+                            "Failed to upsert comments for question %s: %s",
+                            question["id"],
+                            e,
+                            exc_info=True,
+                        )
+
+                try:
+                    if await supabase.check_all_models_completed(question["id"], models_enabled):
+                        await supabase.update_question_status(
+                            question["id"], "completed", set_processed_at=True
+                        )
+                        logger.info(
+                            "Question %s: all required models completed (instant APIs)",
+                            question["id"],
+                        )
+                except Exception as e:
+                    logger.error(
+                        "Failed to check/update status for question %s: %s",
+                        question["id"],
+                        e,
+                        exc_info=True,
+                    )
+
+            semaphore = asyncio.Semaphore(3)
+
+            async def process_with_semaphore(question: Dict[str, Any]) -> None:
+                async with semaphore:
+                    await process_question_with_instant_models(question)
+
+            await asyncio.gather(
+                *[process_with_semaphore(q) for q in claimed_questions],
+                return_exceptions=True,
+            )
+
+        return {
+            "status": "ok",
+            "submitted": len(claimed_questions),
+            "worker_id": worker_id,
+        }
+    finally:
+        await supabase.close()
 
 
 async def handle_quota_error(

@@ -149,21 +149,53 @@ class SupabaseClient:
         if not unique_ids:
             return {}
 
-        def _select():
+        from datetime import datetime, timezone
+
+        def _select_profiles():
+            return (
+                self._client.table("profiles")
+                .select("id,is_premium")
+                .in_("id", unique_ids)
+                .execute()
+            ).data
+
+        def _select_subscribers():
+            # Active subscription: subscribed=true and subscription_end is null or in the future.
             return (
                 self._client.table("subscribers")
-                .select("user_id,subscribed")
+                .select("user_id,subscribed,subscription_end")
                 .in_("user_id", unique_ids)
                 .eq("subscribed", True)
                 .execute()
             ).data
 
-        rows = await self._run_sync(_select)
+        profiles = await self._run_sync(_select_profiles)
+        subs = await self._run_sync(_select_subscribers)
+
         premium_map: Dict[str, bool] = {}
-        for row in rows or []:
+
+        # profiles.is_premium
+        for row in profiles or []:
+            uid = str(row.get("id"))
+            if uid:
+                premium_map[uid] = bool(row.get("is_premium"))
+
+        # active subscribers (respect subscription_end)
+        now = datetime.now(timezone.utc)
+        for row in subs or []:
             uid = str(row.get("user_id"))
-            # If a user has an active subscription, treat as premium
-            premium_map[uid] = True
+            if not uid:
+                continue
+            end = row.get("subscription_end")
+            try:
+                end_dt = datetime.fromisoformat(str(end).replace("Z", "+00:00")) if end else None
+            except Exception:
+                end_dt = None
+            is_active = bool(row.get("subscribed")) and (end_dt is None or end_dt > now)
+            if is_active:
+                premium_map[uid] = True
+
+        # Missing users default to False
         return premium_map
 
     async def _get_private_quota(
@@ -690,6 +722,20 @@ class SupabaseClient:
         if processing_status == "failed":
             return False
 
+        # Determine required model set based on the queue target_level.
+        target_level = await self.get_queue_target_level(question_id)
+        if target_level == "partial":
+            # Partial jobs only require Mistral + DeepSeek (if enabled).
+            required_models = {
+                name for name, enabled in (models_enabled or {}).items()
+                if enabled and name in {"mistral", "deepseek"}
+            }
+        else:
+            required_models = {
+                name for name, enabled in (models_enabled or {}).items()
+                if enabled
+            }
+
         # Map model names to database column names
         model_columns = {
             "chatgpt": "chatgpt_general_comment",
@@ -699,10 +745,8 @@ class SupabaseClient:
             "deepseek": "deepseek_general_comment",
         }
 
-        # Check each enabled model
-        for model_name, enabled in models_enabled.items():
-            if not enabled:
-                continue
+        # Check each required model
+        for model_name in required_models:
 
             column = model_columns.get(model_name)
             if not column:
@@ -718,6 +762,129 @@ class SupabaseClient:
 
         return True
 
+    # -------------------------------------------------------------------------
+    # Job queue helpers (ai_commentary_job_queue) + RPC helpers
+    # -------------------------------------------------------------------------
+
+    async def fetch_queue_jobs(self, job_ids: List[str]) -> List[Dict[str, Any]]:
+        if not job_ids:
+            return []
+
+        def _select():
+            return (
+                self._client.table("ai_commentary_job_queue")
+                .select("*")
+                .in_("id", job_ids)
+                .execute()
+            ).data
+
+        return await self._run_sync(_select)
+
+    async def update_queue_job(
+        self,
+        job_id: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        def _update():
+            self._client.table("ai_commentary_job_queue").update(payload).eq("id", job_id).execute()
+
+        await self._run_sync(_update)
+
+    async def update_queue_for_question(
+        self,
+        question_id: str,
+        status: str,
+        last_error: Optional[str] = None,
+    ) -> None:
+        def _update():
+            patch: Dict[str, Any] = {
+                "status": status,
+                "claimed_by": None,
+                "claimed_at": None,
+                "lease_expires_at": None,
+                "updated_at": "now()",
+            }
+            if last_error is not None:
+                patch["last_error"] = last_error
+            # Use raw now() for updated_at? PostgREST doesn't evaluate now() in JSON;
+            # so we keep it nullable and rely on db default/trigger. If column exists,
+            # we set an ISO timestamp.
+            from datetime import datetime, timezone
+            patch["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._client.table("ai_commentary_job_queue").update(patch).eq("question_id", question_id).execute()
+
+        await self._run_sync(_update)
+
+    async def get_queue_target_level(self, question_id: str) -> Optional[str]:
+        def _select():
+            resp = (
+                self._client.table("ai_commentary_job_queue")
+                .select("target_level,status")
+                .eq("question_id", question_id)
+                .limit(1)
+                .execute()
+            )
+            return resp.data
+
+        rows = await self._run_sync(_select)
+        if not rows:
+            return None
+        return rows[0].get("target_level")
+
+    async def is_premium_user(self, user_id: str) -> bool:
+        def _rpc():
+            resp = self._client.rpc("is_premium_user", {"p_user_id": user_id}).execute()
+            # rpc returns a scalar in `.data`
+            return resp.data
+
+        try:
+            data = await self._run_sync(_rpc)
+            return bool(data)
+        except Exception:
+            return False
+
+    async def get_question_content_hash(self, question_id: str) -> Optional[str]:
+        def _rpc():
+            resp = self._client.rpc("ai_question_content_hash", {"p_question_id": question_id}).execute()
+            return resp.data
+
+        try:
+            data = await self._run_sync(_rpc)
+            return str(data) if data is not None else None
+        except Exception:
+            return None
+
+    async def fetch_questions_by_ids(self, question_ids: List[str]) -> List[Dict[str, Any]]:
+        if not question_ids:
+            return []
+
+        def _select():
+            return (
+                self._client.table("questions")
+                .select("*")
+                .in_("id", question_ids)
+                .execute()
+            ).data
+
+        return await self._run_sync(_select)
+
+    async def mark_questions_processing(self, question_ids: List[str]) -> None:
+        if not question_ids:
+            return
+
+        from datetime import datetime, timezone
+
+        def _update():
+            # Only transition pending -> processing (defensive).
+            self._client.table("questions").update(
+                {
+                    "ai_commentary_status": "processing",
+                    "ai_commentary_processed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ).in_("id", question_ids).eq("ai_commentary_status", "pending").execute()
+
+        await self._run_sync(_update)
+
     async def update_question_status(
         self,
         question_id: str,
@@ -726,6 +893,7 @@ class SupabaseClient:
     ) -> None:
         def _update():
             from datetime import datetime, timezone
+            from datetime import timedelta as td_mod
 
             # Read existing state first so we can decide whether this is the
             # first time a question is marked as completed (for quota updates).
@@ -738,6 +906,19 @@ class SupabaseClient:
             )
             existing_rows = existing_resp.data or []
             existing_row = existing_rows[0] if existing_rows else None
+
+            # Load queue metadata (if present) so we can:
+            # - treat partial jobs as complete without requiring full model set
+            # - update queue + ai_commentary_state consistently
+            queue_resp = (
+                self._client.table("ai_commentary_job_queue")
+                .select("target_level")
+                .eq("question_id", question_id)
+                .limit(1)
+                .execute()
+            )
+            queue_rows = queue_resp.data or []
+            queue_target_level = queue_rows[0].get("target_level") if queue_rows else None
 
             first_time_completed = False
             if status == "completed" and existing_row is not None:
@@ -761,12 +942,126 @@ class SupabaseClient:
                     "processing_status": "completed"
                 }).eq("question_id", question_id).execute()
 
+            # Update queue terminal state (best-effort; queue may not exist for legacy runs).
+            if status in {"completed", "failed"}:
+                queue_patch: Dict[str, Any] = {
+                    "status": status,
+                    "claimed_by": None,
+                    "claimed_at": None,
+                    "lease_expires_at": None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                if status == "failed":
+                    queue_patch["last_error"] = "question_marked_failed"
+                self._client.table("ai_commentary_job_queue").update(queue_patch).eq(
+                    "question_id", question_id
+                ).execute()
+
+            # Update canonical processing state (content hash + timestamps).
+            if status == "completed":
+                # Compute deterministic content hash (server-side function).
+                try:
+                    hash_resp = self._client.rpc(
+                        "ai_question_content_hash", {"p_question_id": question_id}
+                    ).execute()
+                    content_hash = hash_resp.data
+                except Exception:
+                    content_hash = None
+
+                now_iso = datetime.now(timezone.utc).isoformat()
+                state_patch: Dict[str, Any] = {
+                    "question_id": question_id,
+                    "updated_at": now_iso,
+                }
+
+                if queue_target_level == "partial":
+                    state_patch.update(
+                        {
+                            "last_partial_processed_at": now_iso,
+                            "last_partial_content_hash": content_hash,
+                        }
+                    )
+                else:
+                    state_patch.update(
+                        {
+                            "last_full_processed_at": now_iso,
+                            "last_full_content_hash": content_hash,
+                        }
+                    )
+
+                # Upsert into ai_commentary_state (question_id PK).
+                self._client.table("ai_commentary_state").upsert(
+                    state_patch, on_conflict="question_id"
+                ).execute()
+
+                # Quota/credits ledgers for private FULL processing only.
+                if existing_row is not None:
+                    visibility = existing_row.get("visibility") or "private"
+                    user_id = existing_row.get("user_id")
+                    if visibility == "private" and user_id and queue_target_level != "partial":
+                        # Rolling 30-day window usage BEFORE inserting this question.
+                        window_start = (datetime.now(timezone.utc) - td_mod(days=30)).isoformat()
+                        used_before_resp = (
+                            self._client.table("ai_private_quota_ledger")
+                            .select("id", count="exact")
+                            .eq("user_id", user_id)
+                            .eq("kind", "full")
+                            .gte("event_ts", window_start)
+                            .execute()
+                        )
+                        used_before = int(getattr(used_before_resp, "count", 0) or 0)
+
+                        inserted_quota = False
+                        try:
+                            ins = (
+                                self._client.table("ai_private_quota_ledger")
+                                .insert(
+                                    {
+                                        "user_id": user_id,
+                                        "question_id": question_id,
+                                        "kind": "full",
+                                        "event_ts": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                )
+                                .execute()
+                            )
+                            # If insert succeeded, data is usually non-empty.
+                            inserted_quota = bool(getattr(ins, "data", None))
+                        except Exception:
+                            inserted_quota = False
+
+                        # Consume 1 credit only for overflow beyond base 100 in rolling 30d.
+                        if inserted_quota and used_before >= 100:
+                            try:
+                                credits_resp = self._client.rpc(
+                                    "ai_private_credits_remaining", {"p_user_id": str(user_id)}
+                                ).execute()
+                                credits_remaining = int(credits_resp.data or 0)
+                            except Exception:
+                                credits_remaining = 0
+
+                            if credits_remaining > 0:
+                                try:
+                                    self._client.table("ai_private_credits_ledger").insert(
+                                        {
+                                            "user_id": user_id,
+                                            "credits_delta": -1,
+                                            "source": "consume_full_question",
+                                            "ref": f"{user_id}:{question_id}",
+                                            "event_ts": datetime.now(timezone.utc).isoformat(),
+                                        }
+                                    ).execute()
+                                except Exception:
+                                    # Idempotency: ignore duplicates or insertion errors.
+                                    pass
+
             # If this is the first time a private question is completed, update
             # the per-user monthly quota and paid credits.
             if first_time_completed and existing_row is not None:
                 visibility = existing_row.get("visibility") or "private"
                 user_id = existing_row.get("user_id")
-                if visibility == "private" and user_id:
+                # Legacy table is kept for UI compatibility; only count FULL jobs.
+                if visibility == "private" and user_id and queue_target_level != "partial":
                     from datetime import datetime as dt_mod, timedelta as td_mod, timezone as tz_mod
 
                     now = dt_mod.now(tz_mod.utc)
