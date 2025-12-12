@@ -6,8 +6,8 @@ global:
     environment: 'production'
 
 # Alertmanager configuration (optional)
-  alerting:
-    alertmanagers:
+alerting:
+  alertmanagers:
     - static_configs:
         - targets:
           - alertmanager:9093
