@@ -41,14 +41,65 @@ services:
     networks:
       - backend
       - supabase_grafana
+      - metrics
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache gettext
+        envsubst < /etc/prometheus/prometheus.yml.template > /etc/prometheus/prometheus.yml
+        exec /bin/prometheus --config.file=/etc/prometheus/prometheus.yml \
+          --storage.tsdb.path=/prometheus \
+          --web.console.libraries=/usr/share/prometheus/console_libraries \
+          --web.console.templates=/usr/share/prometheus/consoles \
+          --storage.tsdb.retention.time=30d \
+          --web.enable-lifecycle
+    volumes:
+      - ./supabase-metrics/prometheus.yml.template:/etc/prometheus/prometheus.yml.template:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - metrics
+    env_file: .env
+    environment:
+      - SUPABASE_PROJECT_REF=${SUPABASE_PROJECT_REF}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./supabase-metrics/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - metrics
+      - supabase_grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3000}
+      - GF_INSTALL_PLUGINS=
 
 
 volumes:
   caddy_data:
   caddy_config:
+  prometheus_data:
+  grafana_data:
 
 networks:
   backend:
+  metrics:
   supabase_grafana:
     external: true
     name: supabase-grafana_default

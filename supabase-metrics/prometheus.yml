@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 60s
+  evaluation_interval: 60s
+  external_labels:
+    cluster: 'altfragen-io'
+    environment: 'production'
+
+# Alertmanager configuration (optional)
+  alerting:
+    alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+# Load rules once and periodically evaluate them
+rule_files:
+   - "alerts.yml"
+
+scrape_configs:
+  # Supabase metrics scraping
+  - job_name: 'supabase'
+    scrape_interval: 60s
+    metrics_path: /customer/v1/privileged/metrics
+    scheme: https
+    basic_auth:
+      username: service_role
+      password: '${SUPABASE_SERVICE_ROLE_KEY}'
+    static_configs:
+      - targets:
+          - '${SUPABASE_PROJECT_REF}.supabase.co:443'
+        labels:
+          project: '${SUPABASE_PROJECT_REF}'
+          service: 'supabase'
+
