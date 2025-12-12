@@ -24,11 +24,11 @@ scrape_configs:
     scheme: https
     basic_auth:
       username: service_role
-      password: '${SUPABASE_SERVICE_ROLE_KEY}'
+      password_file: /run/secrets/supabase_service_role_key
     static_configs:
       - targets:
-          - '${SUPABASE_PROJECT_REF}.supabase.co:443'
+          - 'ynzxzhpivcmkpipanltd.supabase.co:443'  # replace with your Supabase project ref
         labels:
-          project: '${SUPABASE_PROJECT_REF}'
+          project: 'ynzxzhpivcmkpipanltd'
           service: 'supabase'
 
