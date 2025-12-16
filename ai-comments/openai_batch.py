@@ -9,7 +9,7 @@ from prompts import SYSTEM_PROMPT_WITH_REGENERATING, build_user_prompt
 
 
 # Model version constant
-MODEL_VERSION = "gpt-5.1"
+MODEL_VERSION = "gpt-5.2"
 
 
 JSON_SCHEMA: Dict[str, Any] = {
