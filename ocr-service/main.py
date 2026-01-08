@@ -66,7 +66,7 @@ QUESTION_SCHEMA = {
                     "correctAnswer": {"type": "string", "enum": ["A", "B", "C", "D", "E"]},
                     "comment": {"type": "string"}
                 },
-                "required": ["question", "optionA", "optionB", "optionC", "optionD", "optionE", "correctAnswer"]
+                "required": ["question", "optionA", "optionB", "optionC", "optionD", "optionE"]
             }
         }
     },
@@ -216,8 +216,8 @@ async def extract_questions_from_ocr(ocr_response: Any) -> List[Dict[str, Any]]:
 
 
 def validate_question(question: Dict[str, Any]) -> bool:
-    """Validate that a question has all required fields"""
-    required_fields = ["question", "optionA", "optionB", "optionC", "optionD", "optionE", "correctAnswer"]
+    """Validate that a question has all required fields (correctAnswer is optional)"""
+    required_fields = ["question", "optionA", "optionB", "optionC", "optionD", "optionE"]
     return all(field in question and question[field] for field in required_fields)
 
 
@@ -233,6 +233,11 @@ def prepare_question_for_db(
     subject: Optional[str]
 ) -> Dict[str, Any]:
     """Convert question from OCR format to database format"""
+    correct_answer = question.get("correctAnswer", "").strip().upper()
+    # Validate correctAnswer if provided (must be A-E)
+    if correct_answer and correct_answer not in ["A", "B", "C", "D", "E"]:
+        correct_answer = ""  # Set to empty if invalid
+    
     return {
         "user_id": user_id,
         "question": question.get("question", "").strip(),
@@ -241,7 +246,7 @@ def prepare_question_for_db(
         "option_c": question.get("optionC", "").strip(),
         "option_d": question.get("optionD", "").strip(),
         "option_e": question.get("optionE", "").strip(),
-        "correct_answer": question.get("correctAnswer", "").strip().upper(),
+        "correct_answer": correct_answer,
         "comment": question.get("comment", "").strip() if question.get("comment") else None,
         "subject": subject.strip() if subject else "",
         "filename": filename,
