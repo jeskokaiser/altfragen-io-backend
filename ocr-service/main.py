@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
 from mistralai import Mistral
+from mistralai.extra import response_format_from_pydantic_model
 
 from supabase_client import SupabaseClient
 
@@ -51,30 +52,26 @@ OCR_MODEL = "mistral-ocr-latest"
 # Initialize Supabase client
 supabase_client = SupabaseClient()
 
-# JSON schema for question extraction
-QUESTION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "questions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "question": {"type": "string"},
-                    "optionA": {"type": "string"},
-                    "optionB": {"type": "string"},
-                    "optionC": {"type": "string"},
-                    "optionD": {"type": "string"},
-                    "optionE": {"type": "string"},
-                    "correctAnswer": {"type": "string", "enum": ["A", "B", "C", "D", "E"]},
-                    "comment": {"type": "string"}
-                },
-                "required": ["question", "optionA", "optionB", "optionC", "optionD", "optionE"]
-            }
-        }
-    },
-    "required": ["questions"]
-}
+
+class QuestionAnnotation(BaseModel):
+    """
+    Structured representation of a single extracted question for Mistral annotations.
+    """
+    question: str
+    optionA: str
+    optionB: str
+    optionC: str
+    optionD: str
+    optionE: str
+    correctAnswer: Optional[str] = None
+    comment: Optional[str] = None
+
+
+class QuestionsDocument(BaseModel):
+    """
+    Top-level annotation model containing all extracted questions.
+    """
+    questions: List[QuestionAnnotation]
 
 
 @app.get("/")
@@ -179,36 +176,59 @@ async def prepare_document_for_mistral(file: UploadFile) -> Dict[str, Any]:
 
 async def extract_questions_from_ocr(ocr_response: Any) -> List[Dict[str, Any]]:
     """
-    Extract questions from Mistral OCR response.
-    The response should contain document_annotation with JSON string.
+    Extract questions from Mistral OCR response using document annotations.
     """
     try:
-        # Get the document_annotation field which contains the JSON
-        document_annotation = ocr_response.document_annotation
-        
+        # Get the document_annotation field which contains the structured data
+        document_annotation = getattr(ocr_response, "document_annotation", None)
+
         if not document_annotation:
             # Fallback: try to extract from pages markdown
             logger.warning("No document_annotation found, trying to parse from pages")
-            if hasattr(ocr_response, 'pages') and ocr_response.pages:
+            if hasattr(ocr_response, "pages") and ocr_response.pages:
                 # Extract markdown from first page
                 markdown_content = ocr_response.pages[0].markdown if ocr_response.pages else ""
-                # This would require additional parsing - for now, return empty
-                logger.error("Cannot extract questions from markdown without additional parsing")
+                logger.error(
+                    "Cannot extract questions from markdown without additional parsing"
+                )
                 return []
             return []
-        
-        # Parse JSON string
-        import json
-        parsed_data = json.loads(document_annotation)
-        
+
+        # Normalize annotation to a plain dict
+        if hasattr(document_annotation, "model_dump"):
+            # Pydantic model
+            annotation_dict = document_annotation.model_dump()
+        elif isinstance(document_annotation, dict):
+            annotation_dict = document_annotation
+        else:
+            # Fallback: try JSON parsing if it's a string
+            import json
+
+            try:
+                annotation_dict = json.loads(str(document_annotation))
+            except Exception:
+                logger.error("document_annotation is in an unexpected format")
+                return []
+
         # Extract questions array
-        questions = parsed_data.get("questions", [])
-        
-        if not questions:
+        questions = annotation_dict.get("questions", []) or []
+
+        # If questions are Pydantic models, convert them to dicts
+        normalized_questions: List[Dict[str, Any]] = []
+        for q in questions:
+            if hasattr(q, "model_dump"):
+                normalized_questions.append(q.model_dump())
+            elif isinstance(q, dict):
+                normalized_questions.append(q)
+            else:
+                # Best-effort conversion
+                normalized_questions.append(dict(q))
+
+        if not normalized_questions:
             logger.warning("No questions found in OCR response")
             return []
-        
-        return questions
+
+        return normalized_questions
     
     except Exception as e:
         logger.error(f"Error extracting questions from OCR response: {e}")
@@ -307,14 +327,13 @@ async def process_document(
         # Call Mistral OCR API
         logger.info("Calling Mistral OCR API...")
         try:
-            # Use configured model or None for default
+            # Use configured OCR model with structured document annotations
+            document_format = response_format_from_pydantic_model(QuestionsDocument)
+
             ocr_response = mistral.ocr.process(
-                model=OCR_MODEL,  # None uses default model
+                model=OCR_MODEL,
                 document=document,
-                document_annotation_format={
-                    "type": "json_schema",
-                    "json_schema": QUESTION_SCHEMA
-                }
+                document_annotation_format=document_format,
             )
         except Exception as e:
             logger.error(f"Mistral OCR API error: {e}")
