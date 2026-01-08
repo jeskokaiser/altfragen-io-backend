@@ -46,7 +46,7 @@ if not mistral_api_key:
 mistral = Mistral(api_key=mistral_api_key)
 
 # OCR model name - can be overridden via environment variable
-OCR_MODEL = os.getenv("MISTRAL_OCR_MODEL", None)  # None uses default model
+OCR_MODEL = os.getenv("MISTRAL_OCR_MODEL", mistral-ocr-latest)  # None uses default model
 
 # Initialize Supabase client
 supabase_client = SupabaseClient()
