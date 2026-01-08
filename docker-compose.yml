@@ -27,6 +27,17 @@ services:
       - backend
     restart: unless-stopped
 
+  altfragen_ocr:
+    build: ./ocr-service
+    container_name: altfragen_ocr
+    env_file: .env
+    volumes:
+      - ./ocr-service:/app
+    networks:
+      - backend
+    ports:
+      - "8002:8002"
+
   caddy:
     image: caddy:2
     container_name: caddy_reverse_proxy
