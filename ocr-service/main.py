@@ -45,6 +45,9 @@ if not mistral_api_key:
 
 mistral = Mistral(api_key=mistral_api_key)
 
+# OCR model name - can be overridden via environment variable
+OCR_MODEL = os.getenv("MISTRAL_OCR_MODEL", None)  # None uses default model
+
 # Initialize Supabase client
 supabase_client = SupabaseClient()
 
@@ -304,8 +307,9 @@ async def process_document(
         # Call Mistral OCR API
         logger.info("Calling Mistral OCR API...")
         try:
+            # Use configured model or None for default
             ocr_response = mistral.ocr.process(
-                model="CX-9",
+                model=OCR_MODEL,  # None uses default model
                 document=document,
                 document_annotation_format={
                     "type": "json_schema",
