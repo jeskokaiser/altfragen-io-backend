@@ -324,27 +324,65 @@ async def process_document(
         # Prepare document for Mistral OCR
         document = await prepare_document_for_mistral(file)
         
-        # Call Mistral OCR API
-        logger.info("Calling Mistral OCR API...")
+        # First pass: call OCR without annotations to determine total page count
+        logger.info("Calling Mistral OCR API (initial pass to determine page count)...")
         try:
-            # Use configured OCR model with structured document annotations
-            document_format = response_format_from_pydantic_model(QuestionsDocument)
-
-            ocr_response = mistral.ocr.process(
+            base_response = mistral.ocr.process(
                 model=OCR_MODEL,
                 document=document,
-                document_annotation_format=document_format,
             )
         except Exception as e:
-            logger.error(f"Mistral OCR API error: {e}")
+            logger.error(f"Mistral OCR API error (base pass): {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"OCR processing failed: {str(e)}"
             )
+
+        total_pages = len(getattr(base_response, "pages", []) or [])
+        logger.info(f"OCR base pass completed, total_pages={total_pages}")
+
+        if total_pages == 0:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "success": False,
+                    "error": "No pages found in the document"
+                }
+            )
+
+        # Second pass: request document annotations in chunks to respect the 8-page limit
+        logger.info("Calling Mistral OCR API for document annotations in chunks...")
+        try:
+            document_format = response_format_from_pydantic_model(QuestionsDocument)
+            max_chunk_pages = 8  # Mistral limit for document_annotations per request
+            annotated_responses = []
+
+            for start in range(0, total_pages, max_chunk_pages):
+                end = min(start + max_chunk_pages, total_pages)
+                page_chunk = list(range(start, end))
+                logger.info(f"Requesting annotations for pages {page_chunk}...")
+
+                resp = mistral.ocr.process(
+                    model=OCR_MODEL,
+                    document=document,
+                    document_annotation_format=document_format,
+                    pages=page_chunk,
+                )
+                annotated_responses.append(resp)
+        except Exception as e:
+            logger.error(f"Mistral OCR API error (annotations pass): {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"OCR processing failed while fetching annotations: {str(e)}"
+            )
         
-        # Extract questions from OCR response
-        logger.info("Extracting questions from OCR response...")
-        extracted_questions = await extract_questions_from_ocr(ocr_response)
+        # Extract questions from all annotation responses
+        logger.info("Extracting questions from OCR annotation responses...")
+        extracted_questions: List[Dict[str, Any]] = []
+        for idx, resp in enumerate(annotated_responses):
+            logger.info(f"Extracting questions from annotation chunk {idx + 1}/{len(annotated_responses)}...")
+            chunk_questions = await extract_questions_from_ocr(resp)
+            extracted_questions.extend(chunk_questions)
         
         if not extracted_questions:
             return JSONResponse(
