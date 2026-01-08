@@ -64,7 +64,9 @@ class QuestionAnnotation(BaseModel):
     optionD: str
     optionE: str
     correctAnswer: Optional[str] = None
-    comment: Optional[str] = None
+    questionCase: Optional[int] = None  # Case number (e.g., from "zu Fall 1" -> 1)
+    questionExamNumber: Optional[int] = None  # Question number in the exam
+    caseText: Optional[str] = None  # The case text/content
 
 
 class QuestionsDocument(BaseModel):
@@ -261,6 +263,29 @@ def prepare_question_for_db(
     if correct_answer and correct_answer not in ["A", "B", "C", "D", "E"]:
         correct_answer = ""  # Set to empty if invalid
     
+    # Extract question case number (e.g., from "zu Fall 1" -> 1)
+    question_case = question.get("questionCase")
+    if question_case is not None:
+        try:
+            question_case = int(question_case)
+        except (ValueError, TypeError):
+            question_case = None
+    
+    # Extract question exam number
+    question_exam_number = question.get("questionExamNumber")
+    if question_exam_number is not None:
+        try:
+            question_exam_number = int(question_exam_number)
+        except (ValueError, TypeError):
+            question_exam_number = None
+    
+    # Extract case text
+    case_text = question.get("caseText")
+    if case_text:
+        case_text = case_text.strip()
+    else:
+        case_text = None
+    
     return {
         "user_id": user_id,
         "question": question.get("question", "").strip(),
@@ -270,7 +295,9 @@ def prepare_question_for_db(
         "option_d": question.get("optionD", "").strip(),
         "option_e": question.get("optionE", "").strip(),
         "correct_answer": correct_answer,
-        "comment": question.get("comment", "").strip() if question.get("comment") else None,
+        "question_case": question_case,
+        "question_exam_number": question_exam_number,
+        "case_text": case_text,
         "subject": subject.strip() if subject else "",
         "filename": filename,
         "difficulty": 3,  # Default difficulty
