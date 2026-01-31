@@ -520,7 +520,7 @@ class SupabaseClient:
           }
 
         Behaviour:
-        - University-visible questions are always treated as full-slot.
+        - University-visible and public questions are always treated as full-slot.
         - Private questions of non-premium users are never expected here
           (they are filtered out in find_candidates), but are treated as
           overflow for safety.
@@ -577,13 +577,14 @@ class SupabaseClient:
             qid: qid in comments_by_qid for qid in question_ids
         }
 
-        # University-visible questions are always full-slot
+        # University-visible and public questions are always full-slot
         for q in questions:
             qid = str(q.get("id"))
             meta = classification.get(qid)
             if not meta:
                 continue
-            if meta.get("visibility") == "university":
+            visibility = meta.get("visibility")
+            if visibility == "university" or visibility == "public":
                 meta["is_full_slot"] = True
 
         # Allocate per-user full slots for premium private questions

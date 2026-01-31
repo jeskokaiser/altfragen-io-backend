@@ -929,18 +929,18 @@ async def upload_document(
         )
     
     # Validiere visibility
-    if visibility not in ["private", "university"]:
+    if visibility not in ["private", "university", "public"]:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
                 "status": "error",
                 "success": False,
-                "message": "Visibility muss entweder 'private' oder 'university' sein",
+                "message": "Visibility muss entweder 'private', 'university' oder 'public' sein",
                 "data": {}
             }
         )
     
-    # Validiere university_id wenn visibility = "university"
+    # Validiere university_id wenn visibility = "university" oder "public"
     validated_university_id = None
     if visibility == "university":
         if not university_id:
@@ -1871,6 +1871,8 @@ def insert_questions_into_db(questions, exam_name, exam_year, exam_semester, use
     elif visibility == "university" and not university_id:
         logger.warning(f"University visibility requested but no university_id provided. Questions will be saved as private.")
         visibility = "private"  # Fallback to private
+    elif visibility == "public":
+        logger.info(f"Public assignment: {len(questions)} questions will be saved as public (no university assignment, visible to all registered universities)")
     elif visibility == "private":
         logger.info(f"Private assignment: {len(questions)} questions will be saved as private (no university assignment)")
     
@@ -1915,6 +1917,7 @@ def insert_questions_into_db(questions, exam_name, exam_year, exam_semester, use
             continue
 
         # Determine final university_id based on visibility and provided university_id
+        # For public and private, university_id should be None
         final_university_id = None
         if visibility == "university" and university_id:
             final_university_id = str(university_id)

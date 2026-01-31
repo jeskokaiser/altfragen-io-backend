@@ -332,13 +332,14 @@ async def process_document(
             )
         
         # Validate visibility
-        if visibility not in ["private", "university"]:
+        if visibility not in ["private", "university", "public"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Visibility must be 'private' or 'university'"
+                detail="Visibility must be 'private', 'university', or 'public'"
             )
         
         # Validate university_id if visibility is university
+        # For public visibility, university_id should be None (same as private)
         university_id = universityId.strip() if universityId else None
         if visibility == "university" and not university_id:
             raise HTTPException(
