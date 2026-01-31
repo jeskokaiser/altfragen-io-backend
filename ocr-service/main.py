@@ -119,6 +119,18 @@ async def prepare_document_for_mistral(file: UploadFile) -> Dict[str, Any]:
     file_ext = os.path.splitext(file.filename or "")[1].lower()
     content_type = file.content_type or ""
     
+    # Check file size (Supabase storage configured for 100MB limit)
+    MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB in bytes
+    file_size = len(content)
+    
+    if file_size > MAX_FILE_SIZE:
+        size_mb = file_size / (1024 * 1024)
+        max_mb = MAX_FILE_SIZE / (1024 * 1024)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large: {size_mb:.2f}MB. Maximum allowed size is {max_mb}MB."
+        )
+    
     # For PDFs, we need to upload to a temporary location or use base64
     # Mistral OCR supports document_url, image_url, or file_id
     # For simplicity, we'll use base64 encoding for images and handle PDFs differently
@@ -149,8 +161,19 @@ async def prepare_document_for_mistral(file: UploadFile) -> Dict[str, Any]:
                 "document_url": public_url,
                 "type": "document_url"
             }
+        except HTTPException:
+            # Re-raise HTTPExceptions (like 413) as-is
+            raise
         except Exception as e:
             logger.error(f"Error uploading PDF to storage: {e}")
+            # Check if it's a size-related error
+            error_str = str(e).lower()
+            if "too large" in error_str or "413" in error_str or "payload" in error_str:
+                size_mb = file_size / (1024 * 1024)
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File too large for storage: {size_mb:.2f}MB. Please use a smaller file."
+                )
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to prepare PDF for OCR: {str(e)}"
@@ -258,7 +281,9 @@ def prepare_question_for_db(
     subject: Optional[str]
 ) -> Dict[str, Any]:
     """Convert question from OCR format to database format"""
-    correct_answer = question.get("correctAnswer", "").strip().upper()
+    # Handle None values explicitly - .get() returns None if key exists with None value
+    correct_answer_raw = question.get("correctAnswer") or ""
+    correct_answer = str(correct_answer_raw).strip().upper() if correct_answer_raw else ""
     # Validate correctAnswer if provided (must be A-E)
     if correct_answer and correct_answer not in ["A", "B", "C", "D", "E"]:
         correct_answer = ""  # Set to empty if invalid
@@ -286,14 +311,19 @@ def prepare_question_for_db(
     else:
         case_text = None
     
+    # Helper function to safely get and strip string values
+    def safe_get_str(key: str, default: str = "") -> str:
+        value = question.get(key) or default
+        return str(value).strip() if value else default
+    
     return {
         "user_id": user_id,
-        "question": question.get("question", "").strip(),
-        "option_a": question.get("optionA", "").strip(),
-        "option_b": question.get("optionB", "").strip(),
-        "option_c": question.get("optionC", "").strip(),
-        "option_d": question.get("optionD", "").strip(),
-        "option_e": question.get("optionE", "").strip(),
+        "question": safe_get_str("question"),
+        "option_a": safe_get_str("optionA"),
+        "option_b": safe_get_str("optionB"),
+        "option_c": safe_get_str("optionC"),
+        "option_d": safe_get_str("optionD"),
+        "option_e": safe_get_str("optionE"),
         "correct_answer": correct_answer,
         "question_case": question_case,
         "question_exam_number": question_exam_number,
